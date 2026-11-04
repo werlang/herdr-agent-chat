@@ -1,0 +1,8 @@
+{
+  "name": "agent-chat",
+  "version": "0.1.0",
+  "title": "Agent Chat UI",
+  "description": "Native Chat UI for AI agent terminals in Herdr",
+  "place": "none",
+  "focusable": true
+}
