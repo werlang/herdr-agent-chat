@@ -26,6 +26,8 @@ import {
   focused,
   spaces,
   knownAgents,
+  placement,
+  window,
 } from "herdr";
 import {
   parseConversation,
@@ -35,6 +37,7 @@ import {
   classifyTool,
 } from "./parser.js";
 import { annotateRows, contentHash, liveThoughtLine } from "./transcript-blocks.js";
+import { resolvePaneVisibility } from "./pane-visibility.js";
 import { ClaudeTranscript } from "./claude-transcript.js";
 import { OpenCodeTranscript } from "./opencode-transcript.js";
 
@@ -243,7 +246,9 @@ export default class AgentChat extends View {
   init(_props, cx) {
     const p = props();
     this.terminal = resolveTerminal();
+    this.hostTerminal = p?.terminal || null;
     this.followFocused = !p?.terminal;
+    this._paneId = p?.pane || null;
     this.blocks = [];
     this.activeDetail = "";
     this.status = "idle";
@@ -309,7 +314,8 @@ export default class AgentChat extends View {
       } catch (_e) {}
     });
 
-    this.update(cx);
+    this._shown = this.isShown();
+    if (this._shown) this.update(cx);
     cx.timer.every(1000, (cx) => this.poll(cx));
   }
 
@@ -340,7 +346,42 @@ export default class AgentChat extends View {
     this.refreshLater(cx);
   }
 
+  /**
+   * Whether this copy is actually on screen. Herdr keeps a hidden mod's
+   * timers running (another tab, a settled tab, a hidden layout block, or
+   * behind a zoomed sibling), so polling there only steals frames from the
+   * TUI the person is using.
+   *
+   * A pane created with `pane.split {mod, props}` gets only its props, not its
+   * pane id. When the copy was opened for a terminal, the chat pane is the one
+   * in that terminal's tab; otherwise the active tab is used as a coarse
+   * "is any chat visible" signal.
+   * @returns {boolean}
+   */
+  isShown() {
+    const { shown, paneId } = resolvePaneVisibility({
+      paneId: this._paneId,
+      hostTerminal: this.hostTerminal,
+      panes: panes(),
+      focused: focused(),
+      windowActive: window()?.active ?? false,
+      overlay: Boolean(props()?.overlay),
+      floating: placement() !== null,
+    });
+    if (paneId) this._paneId = paneId;
+    return shown;
+  }
+
   async poll(cx) {
+    const shown = this.isShown();
+    if (shown !== this._shown) {
+      this._shown = shown;
+      // Drop the working spinner while hidden: it is a native animation, so
+      // leaving it on keeps the window painting for a pane nobody sees.
+      cx.notify();
+    }
+    if (!shown) return;
+
     if (this.followFocused) {
       const f = focused();
       const current =
