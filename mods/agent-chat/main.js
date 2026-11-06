@@ -28,6 +28,7 @@ import {
   knownAgents,
   placement,
   window,
+  fonts,
 } from "herdr";
 import {
   parseConversation,
@@ -38,6 +39,8 @@ import {
 } from "./parser.js";
 import { annotateRows, contentHash, liveThoughtLine } from "./transcript-blocks.js";
 import { resolvePaneVisibility } from "./pane-visibility.js";
+import { demoBlocks } from "./demo-blocks.js";
+import { pickBodyFont } from "./body-font.js";
 import { ClaudeTranscript } from "./claude-transcript.js";
 import { OpenCodeTranscript } from "./opencode-transcript.js";
 
@@ -411,6 +414,19 @@ async function hcOrThrow(args) {
   return res;
 }
 
+/** Prose font with real bold and italic faces; looked up once. See body-font.js. */
+let bodyFontName;
+function bodyFont() {
+  if (bodyFontName === undefined) {
+    try {
+      bodyFontName = pickBodyFont(fonts());
+    } catch (_e) {
+      bodyFontName = null;
+    }
+  }
+  return bodyFontName;
+}
+
 export default class AgentChat extends View {
   init(_props, cx) {
     const p = props();
@@ -483,6 +499,35 @@ export default class AgentChat extends View {
         cx.notify();
       } catch (_e) {}
     });
+
+    // `props.demo` ("opencode" | "claude") shows a fixed conversation that
+    // uses every element, with no agent behind it. See demo-blocks.js.
+    this.demo = p?.demo ? String(p.demo) : null;
+    if (this.demo) {
+      this.terminal = "demo";
+      this.followFocused = false;
+      this.setBlocks(
+        assignKeys(demoBlocks(this.demo === "claude" ? "claude" : "opencode", p?.part ?? null), [])
+      );
+      this.windowStart = Math.max(0, this.blocks.length - FEED_WINDOW);
+      // `props.expand` opens every group, thought and tool call up front.
+      if (p?.expand) {
+        for (const b of this.blocks) {
+          this.expanded.add(b.ekey);
+          (b.tools || []).forEach((_x, i) => this.expanded.add(`${b.ekey}:tool${i}`));
+          (b.thoughts || []).forEach((_x, i) => this.expanded.add(`${b.ekey}:thought${i}`));
+        }
+      }
+    }
+
+    // `props.open` ("model" | "agent") starts with that picker open, so it can
+    // be looked at without a click.
+    if (p?.open === "model") {
+      this.modelMenuOpen = true;
+      this.refreshModels(cx);
+    } else if (p?.open === "agent") {
+      this.pickerOpen = true;
+    }
 
     this.updateGitBranch();
     this._shown = this.isShown();
@@ -568,6 +613,7 @@ export default class AgentChat extends View {
   }
 
   async poll(cx) {
+    if (this.demo) return;
     const shown = this.isShown();
     if (shown !== this._shown) {
       this._shown = shown;
@@ -590,6 +636,7 @@ export default class AgentChat extends View {
   }
 
   async update(cx) {
+    if (this.demo) return;
     const now = Date.now();
     if (this._updating && now - (this._updatingSince || 0) < 30_000) return;
     this._updating = true;
@@ -860,7 +907,7 @@ export default class AgentChat extends View {
   /** Sends the composer input or attached images to the agent terminal. */
   send(cx) {
     const val = (this.input.value() || "").trim();
-    if (!this.terminal || (!val && !this.attached)) return;
+    if (this.demo || !this.terminal || (!val && !this.attached)) return;
     cx.spawn(async (cx) => {
       try {
         if (!val) {
@@ -1267,7 +1314,14 @@ export default class AgentChat extends View {
       h_flex()
         .w_full()
         .justify_center()
-        .child(v_flex().w_full().max_w(COLUMN).px(24).child(content));
+        .child(
+          v_flex()
+            .w_full()
+            .max_w(COLUMN)
+            .px(24)
+            .when(Boolean(bodyFont()), (el) => el.font_family(bodyFont()))
+            .child(content)
+        );
 
     if (block.type === "spacer") return div().w_full().h(block.size);
     const copied = this.copiedKey === block.ekey;
