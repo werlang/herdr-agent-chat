@@ -5,13 +5,14 @@
 // replies as plain full-width Markdown, collapsed "thinking" and tool lines,
 // and a rounded composer pinned to the bottom.
 //
-// The feed is a virtual `list()`: only the rows on screen are built and laid
-// out, so scrolling costs the same with ten turns or a thousand. Rows may not
-// register handlers (the host forbids it inside a list renderer), so each row
-// has exactly one primary action through `on_item_click` (expand/collapse) and
-// one secondary action through `on_item_secondary_click` (copy).
-import { View, div, svg, image, list } from "gpui-kit";
-import { v_flex, h_flex, TextareaState, Textarea, Scrollbar, TextView, VirtualListScrollHandle } from "gpui-base";
+// The feed is a reversed scroll container: rows are drawn newest-first inside
+// a `flex_col_reverse`, so GPUI starts at the bottom and keeps the newest turn
+// visible without any programmatic scrolling. When the person scrolls up, the
+// feed freezes its window (new turns do not move their view), and older turns
+// load a page at a time. Only a bounded window of rows is built, so a long
+// session does not cost a full transcript render on every poll.
+import { View, div, svg, image } from "gpui-kit";
+import { v_flex, h_flex, TextareaState, Textarea, Scrollbar, TextView } from "gpui-base";
 import {
   hc,
   exec,
@@ -26,14 +27,24 @@ import {
   spaces,
   knownAgents,
 } from "herdr";
-import { parseConversation, spliceHistory } from "./parser.js";
+import {
+  parseConversation,
+  spliceHistory,
+  toolGroupSummaryKind,
+  summarizeToolGroup,
+  classifyTool,
+} from "./parser.js";
+import { annotateRows, contentHash, liveThoughtLine } from "./transcript-blocks.js";
 import { ClaudeTranscript } from "./claude-transcript.js";
 import { OpenCodeTranscript } from "./opencode-transcript.js";
 
 /** Width of the reading column, in px. */
 const COLUMN = 760;
 
-/** Models Claude Code can switch to with `/model <id>`. */
+/** Turns kept in the live window, and added per "Load earlier" click. */
+const FEED_WINDOW = 20;
+const FEED_PAGE = 60;
+
 const CLAUDE_MODELS = [
   { id: "claude-opus-5-5", label: "Opus 5.5", note: "Most capable for complex work" },
   { id: "claude-sonnet-5-5", label: "Sonnet 5.5", note: "Fast and capable for everyday tasks" },
@@ -122,34 +133,96 @@ function withAlpha(color, alphaHex) {
   return color;
 }
 
-/** djb2 string hash, base-36. Cheap and stable across runs. */
-function contentHash(str) {
-  let hash = 5381;
-  for (let i = 0; i < str.length; i++) {
-    hash = ((hash << 5) + hash + str.charCodeAt(i)) | 0;
+/**
+ * Whether two blocks at the same `ekey` draw the same content. Transcript
+ * readers reuse the underlying strings for unchanged turns, so most checks are
+ * reference comparisons and a stream only hashes the row that grew.
+ * @param {object} a previous block
+ * @param {object} b current block
+ * @returns {boolean}
+ */
+function sameBlockContent(a, b) {
+  if (a.type !== b.type) return false;
+  if (b.type === "tool_group") {
+    if (a.tools.length !== b.tools.length) return false;
+    for (let i = 0; i < b.tools.length; i++) {
+      const x = a.tools[i];
+      const y = b.tools[i];
+      if (
+        x.title !== y.title ||
+        x.status !== y.status ||
+        x.action !== y.action ||
+        x.detail !== y.detail ||
+        x.hasFailure !== y.hasFailure
+      ) {
+        return false;
+      }
+      const xf = x.changedFiles || [];
+      const yf = y.changedFiles || [];
+      if (xf.length !== yf.length || xf.some((file, i) => file !== yf[i])) return false;
+    }
+    const at = a.thoughts || [];
+    const bt = b.thoughts || [];
+    if (at.length !== bt.length) return false;
+    for (let i = 0; i < bt.length; i++) {
+      if (at[i].text !== bt[i].text || at[i].status !== bt[i].status) return false;
+    }
+    return a.summary === b.summary && a.summaryKind === b.summaryKind;
   }
-  return (hash >>> 0).toString(36);
+  return (
+    a.text === b.text &&
+    a.title === b.title &&
+    a.action === b.action &&
+    a.detail === b.detail &&
+    a.status === b.status &&
+    a.duration === b.duration
+  );
 }
 
 /**
  * Gives every block two identities, computed once per update (never in render):
  * - `ekey`: `type#ordinal`, stable while a block streams; holds expand state.
- * - `key`:  `ekey:contentHash`, changes when the content does, so the list
- *   re-measures a row whose text grew instead of reusing a stale height.
+ * - `key`:  `ekey:contentHash`, changes when the content does, so a row whose
+ *   text grew is rebuilt instead of reusing stale content.
+ * A block whose content is unchanged keeps its previous key, so a streaming
+ * reply does not re-hash the whole transcript once a second.
+ * @param {Array<object>} blocks
+ * @param {Array<object>} [previous] the blocks currently on screen
  */
-function assignKeys(blocks) {
+function assignKeys(blocks, previous) {
+  const previousByEkey = new Map();
+  if (previous) {
+    for (const b of previous) if (b.ekey) previousByEkey.set(b.ekey, b);
+  }
   const ordinals = new Map();
   for (const b of blocks) {
     const n = (ordinals.get(b.type) || 0) + 1;
     ordinals.set(b.type, n);
     b.ekey = `${b.type}#${n}`;
+    const old = previousByEkey.get(b.ekey);
+    if (old?.key && sameBlockContent(old, b)) {
+      b.key = old.key;
+      continue;
+    }
     const body =
       b.type === "tool_group"
-        ? b.tools.map((x) => `${x.title}|${x.status}|${x.detail ?? ""}`).join("\n")
-        : `${b.text ?? ""}|${b.title ?? ""}|${b.detail ?? ""}|${b.status ?? ""}|${b.duration ?? ""}`;
+        ? b.tools.map((x) => `${x.title}|${x.status}|${x.action ?? ""}|${x.detail ?? ""}`).join("\n") +
+          `|${b.summary ?? ""}|${b.summaryKind ?? ""}|` +
+          (b.thoughts || []).map((x) => `${x.status}|${x.text}`).join("\n")
+        : `${b.text ?? ""}|${b.title ?? ""}|${b.action ?? ""}|${b.detail ?? ""}|${b.status ?? ""}|${b.duration ?? ""}`;
     b.key = `${b.ekey}:${contentHash(body)}`;
   }
   return blocks;
+}
+
+/**
+ * Deep-copies blocks for the frozen reading window. Transcript readers reuse
+ * block objects between polls, so the frozen view must not alias them.
+ * @param {Array<object>} blocks
+ * @returns {Array<object>}
+ */
+function cloneBlocks(blocks) {
+  return blocks.map((b) => JSON.parse(JSON.stringify(b)));
 }
 
 /**
@@ -172,12 +245,22 @@ export default class AgentChat extends View {
     this.terminal = resolveTerminal();
     this.followFocused = !p?.terminal;
     this.blocks = [];
+    this.activeDetail = "";
     this.status = "idle";
     this.inputFocused = false;
     this.pickerOpen = false;
     this.modelMenuOpen = false;
     this.copiedKey = null;
     this.pinned = true;
+    this.readingBlocks = null;
+    this.readingStart = 0;
+    this.hasPending = false;
+    this.windowStart = 0;
+    this._feedId = 0;
+    this._feedWidth = -1;
+    this._feedHeight = -1;
+    this._drawnStatus = "";
+    this._blockKeys = "";
     this.attached = 0;
     this.rawText = "";
     this.historyCache = new Map();
@@ -195,7 +278,6 @@ export default class AgentChat extends View {
     this.modelsLoading = false;
 
     this.handle = cx.focus_handle();
-    this.scroll = VirtualListScrollHandle.new();
 
     this.input = TextareaState.new({ placeholder: "Message the agent…", value: "", rows: 1 });
     this.input.set_auto_grow(1, 8);
@@ -240,14 +322,21 @@ export default class AgentChat extends View {
 
   /** Switches the view to another terminal, restoring its cached history. */
   switchTo(address, cx) {
+    if (!address) return;
     this.terminal = address;
-    this.blocks = this.historyCache.get(address) || [];
+    // A poll still running for the previous agent must not land on this one:
+    // a new generation makes it drop its result, and clearing the busy flag
+    // lets the refresh below run now instead of being skipped.
+    this._generation++;
+    this._updating = false;
+    this.transcript = null;
+    this.setBlocks(this.historyCache.get(address) || []);
     this.rawText = this.rawHistoryCache.get(address) || "";
     this._signature = "";
+    this._blockKeys = "";
     this._lastText = undefined;
     this.expanded.clear();
-    this.pinned = true;
-    this.scroll.scroll_to_bottom();
+    this.returnToLive(cx);
     this.refreshLater(cx);
   }
 
@@ -262,11 +351,6 @@ export default class AgentChat extends View {
       }
     }
     await this.update(cx);
-    if (this.pinned && this.viewIsFeed()) this.scroll.scroll_to_bottom();
-  }
-
-  viewIsFeed() {
-    return this.blocks.length > 0;
   }
 
   async update(cx) {
@@ -311,7 +395,7 @@ export default class AgentChat extends View {
         }
       }
       // Fresh objects: cached blocks are shared, keys are written onto them.
-      blocks = assignKeys(blocks.map((b) => ({ ...b })));
+      blocks = assignKeys(blocks.map((b) => ({ ...b })), this.blocks);
 
       if (gen !== this._generation) return;
       this.applyBlocks(blocks, cx);
@@ -341,62 +425,145 @@ export default class AgentChat extends View {
     const result = await this.transcript.refresh((live?.status || "idle") === "working");
     if (gen !== undefined && gen !== this._generation) return true;
     if (!result) return false;
-    this.status = live?.status || "idle";
-    if (result.changed || this._signature === "") this.applyBlocks(assignKeys(result.blocks), cx);
+
+    const nextStatus = live?.status || "idle";
+    const first = this._signature === "";
+    if (!result.changed && !first && nextStatus === this.status) return true;
+    this.status = nextStatus;
+    if (result.changed || first) this.applyBlocks(assignKeys(result.blocks, this.blocks), cx);
     else this.applyBlocks(this.blocks, cx);
     return true;
   }
 
   /**
-   * Puts new blocks on screen if anything drawn changed. Stays pinned to the
-   * bottom while the person is there; once they scroll up to read, new
-   * content arrives below without moving them.
+   * Puts new blocks on screen if anything drawn changed. While the person is
+   * at the bottom, the reversed feed keeps the newest turn visible by itself;
+   * once they scroll up, the frozen window stays put and only the new-content
+   * pill changes.
    */
   applyBlocks(blocks, cx) {
-    const signature = `${this.status}|${blocks.map((b) => b.key).join(",")}`;
+    const blockKeys = blocks.map((b) => b.key).join(",");
+    const signature = `${this.status}|${blockKeys}`;
     if (signature === this._signature) return;
-    const follow = this._signature === "" || this._followNext || this.pinned;
-    this._followNext = false;
+    const contentChanged = blockKeys !== this._blockKeys;
     this._signature = signature;
-    this.blocks = blocks;
+    this._blockKeys = blockKeys;
+    this.setBlocks(blocks);
+
+    if (this.readingBlocks) {
+      const wasPending = this.hasPending;
+      if (contentChanged) this.hasPending = true;
+      // Repaint once when content starts queueing and on status changes. A
+      // stream that only grows while the person reads costs no extra render.
+      const statusChanged = this.status !== this._drawnStatus;
+      if ((contentChanged && !wasPending) || statusChanged) {
+        this._drawnStatus = this.status;
+        cx.notify();
+      }
+      return;
+    }
+
+    this.windowStart = Math.max(0, this.blocks.length - FEED_WINDOW);
+    this.pinned = true;
+    this._drawnStatus = this.status;
     cx.notify();
-    if (follow) this.pinToBottom(cx);
   }
 
   /**
-   * Scrolls to the end and keeps re-applying it for a moment. The list knows
-   * row heights only after drawing them (Markdown rows measure taller than
-   * its estimate), so a single jump can stop short of the real bottom.
+   * Sets the feed's blocks and precomputes their row facts (see annotateRows),
+   * so every place that replaces the feed goes through the same annotation.
+   * @param {Array<object>} blocks
    */
-  pinToBottom(cx) {
-    this.pinned = true;
-    this.scroll.scroll_to_bottom();
-    for (const ms of [16, 60, 150, 300, 600]) {
-      cx.timer.after(ms, () => {
-        if (this.pinned) this.scroll.scroll_to_bottom();
-      });
-    }
+  setBlocks(blocks) {
+    const previous = this.blocks;
+    this.blocks = blocks;
+    this.activeDetail = annotateRows(blocks, previous).activeDetail;
   }
 
-  /** Wheel over the feed: scrolling up unpins; reaching the end again re-pins. */
+  /** The id the reversed scroll container and its Scrollbar share. */
+  feedScrollId() {
+    return `chat-feed-${this._feedId}`;
+  }
+
+  /**
+   * Freezes the window the person is reading. The native reversed container
+   * already kept the newest turn at the bottom; from here on, new turns wait
+   * in `this.blocks` instead of moving their view.
+   * @param {any} cx
+   */
+  startReading(cx) {
+    if (this.readingBlocks) return;
+    this.readingStart = this.windowStart;
+    this.readingBlocks = cloneBlocks(this.blocks.slice(this.readingStart));
+    this.pinned = false;
+    this.hasPending = false;
+    this._drawnStatus = this.status;
+    cx.notify();
+  }
+
+  /**
+   * Adds one page of older turns above the current window. The reversed flex
+   * appends at the visual top, so the reading position below is untouched.
+   * @param {any} cx
+   */
+  loadEarlier(cx) {
+    if (this.readingBlocks) {
+      if (this.readingStart === 0) return;
+      const start = Math.max(0, this.readingStart - FEED_PAGE);
+      const older = cloneBlocks(this.blocks.slice(start, this.readingStart));
+      this.readingBlocks = older.concat(this.readingBlocks);
+      this.readingStart = start;
+    } else {
+      if (this.windowStart === 0) return;
+      this.windowStart = Math.max(0, this.windowStart - FEED_PAGE);
+    }
+    cx.notify();
+  }
+
+  /**
+   * Returns to the live tail and forces a fresh scroll state, which starts the
+   * reversed container at its bottom again.
+   * @param {any} cx
+   */
+  returnToLive(cx) {
+    this.readingBlocks = null;
+    this.readingStart = 0;
+    this.pinned = true;
+    this.hasPending = false;
+    this._feedId++;
+    this.windowStart = Math.max(0, this.blocks.length - FEED_WINDOW);
+    this._drawnStatus = this.status;
+    cx.notify();
+  }
+
+  /**
+   * Wheel over the feed: the native container scrolls itself. The first
+   * upward gesture freezes the window so new turns do not drag the view.
+   * @param {any} e
+   * @param {any} cx
+   */
   onFeedWheel(e, cx) {
     const dy = e?.delta?.y ?? 0;
-    if (dy > 0) this.pinned = false;
-    else if (dy < 0) {
-      cx.timer.after(50, () => {
-        if (this.atBottom()) this.pinned = true;
-      });
-    }
+    if (dy > 0 && !this.readingBlocks) this.startReading(cx);
   }
 
   /**
-   * Whether the feed showed its last row in the most recent frame. The list
-   * builds only the rows on screen, top to bottom, so the bottom spacer is
-   * built last in a frame exactly when the view reaches the end.
+   * The feed viewport changed height (composer growth, working line, resize).
+   * While live, a fresh scroll state re-anchors the reversed container at the
+   * bottom; while reading, leave the person's position alone.
+   * @param {{ width: number, height: number }} size
+   * @param {any} cx
    */
-  atBottom() {
-    if (this._bottomSeenAt === undefined) return true;
-    return this._lastRowAt - this._bottomSeenAt < 30;
+  onFeedResize(size, cx) {
+    const width = Math.round(size.width);
+    const height = Math.round(size.height);
+    if (width === this._feedWidth && height === this._feedHeight) return;
+    this._feedWidth = width;
+    this._feedHeight = height;
+    if (!this.readingBlocks) {
+      this._feedId++;
+      cx.notify();
+    }
   }
 
   /**
@@ -442,9 +609,7 @@ export default class AgentChat extends View {
         }
         this.input.set_value("");
         this.attached = 0;
-        // Your own message always brings you back to the bottom.
-        this._followNext = true;
-        this.pinToBottom(cx);
+        this.returnToLive(cx);
         await this.update(cx);
       } catch (err) {
         this.flashNotice(err, cx);
@@ -495,18 +660,31 @@ export default class AgentChat extends View {
     });
   }
 
-  /** Primary click on a feed row: expand or collapse thinking and tools. */
-  onRowClick(key, cx) {
-    const block = this.blocks.find((b) => b.key === key);
-    if (!block || block.type === "user" || block.type === "assistant") return;
+  /**
+   * Primary click on a feed row: expands or collapses thinking, tool calls,
+   * and long user prompts.
+   * @param {string} key
+   * @param {any} cx
+   */
+  onFeedItemClick(key, cx) {
+    const block =
+      this.blocks.find((b) => b.key === key) || this.readingBlocks?.find((b) => b.key === key);
+    if (!block) return;
+    if (block.type === "assistant" || block.type === "notice") return;
     if (this.expanded.has(block.ekey)) this.expanded.delete(block.ekey);
     else this.expanded.add(block.ekey);
     cx.notify();
   }
 
+  /** Alias for backward compatibility. */
+  onRowClick(key, cx) {
+    this.onFeedItemClick(key, cx);
+  }
+
   /** Secondary click on a feed row: copy a message's text. */
   onRowCopy(key, cx) {
-    const block = this.blocks.find((b) => b.key === key);
+    const block =
+      this.blocks.find((b) => b.key === key) || this.readingBlocks?.find((b) => b.key === key);
     const text =
       block?.type === "tool_group"
         ? block.tools.map((x) => [x.title, x.detail].filter(Boolean).join("\n")).join("\n\n")
@@ -826,8 +1004,10 @@ export default class AgentChat extends View {
   }
 
   /**
-   * One feed row. Runs inside the list renderer: no handlers, no state.
-   * Clicks reach the list's `on_item_click` / `on_item_secondary_click`.
+   * One feed row. Stateless: the wrapper in feedRow owns the click handlers.
+   * @param {object} block
+   * @param {any} t theme
+   * @param {string} monoFont
    */
   renderRow(block, t, monoFont) {
     const column = (content) =>
@@ -837,18 +1017,6 @@ export default class AgentChat extends View {
         .child(v_flex().w_full().max_w(COLUMN).px(24).child(content));
 
     if (block.type === "spacer") return div().w_full().h(block.size);
-
-    if (block.type === "working") {
-      return column(
-        h_flex()
-          .items_center()
-          .gap(8)
-          .py(10)
-          .child(svg("mods/agent-chat/icons/refresh.svg").size(12).text_color(t.working).spin(900))
-          .child(div().text_size(13).text_color(t.dim).child("Working…"))
-      );
-    }
-
     const copied = this.copiedKey === block.ekey;
     const copiedNote = () =>
       h_flex()
@@ -1051,42 +1219,183 @@ export default class AgentChat extends View {
     return div();
   }
 
-  /** The rows the list draws: top/bottom breathing room and a live indicator. */
+  /** Debug/preview rows: top and bottom breathing room around the turns. */
   feedRows() {
-    const rows = [{ type: "spacer", key: "__top", ekey: "__top", size: 12 }, ...this.blocks];
-    if (this.status === "working") rows.push({ type: "working", key: "__working", ekey: "__working" });
-    rows.push({ type: "spacer", key: "__bottom", ekey: "__bottom", size: 24 });
-    return rows;
+    return [
+      { type: "spacer", key: "__top", ekey: "__top", size: 12 },
+      ...this.blocks,
+      { type: "spacer", key: "__bottom", ekey: "__bottom", size: 24 },
+    ];
   }
 
+  /**
+   * One feed row plus its actions. In a plain flex column a row can own its
+   * handlers (the old virtual list had to route them through the list).
+   * @param {object} block
+   * @param {any} t theme
+   * @param {string} monoFont
+   */
+  feedRow(block, t, monoFont) {
+    if (block.type === "spacer") return this.renderRow(block, t, monoFont);
+    return div()
+      .id(`feed-row-${block.ekey}`)
+      .w_full()
+      .on_click((_e, cx) => this.onFeedItemClick(block.key, cx))
+      .on_mouse_down("right", (_e, cx) => this.onRowCopy(block.key, cx))
+      .child(this.renderRow(block, t, monoFont));
+  }
+
+  /** A pill that loads one page of older turns above the window. */
+  renderLoadEarlier(t, cx) {
+    return h_flex()
+      .w_full()
+      .justify_center()
+      .py(10)
+      .child(
+        h_flex()
+          .id("chat-load-earlier")
+          .items_center()
+          .gap(6)
+          .px(12)
+          .py(5)
+          .rounded_full()
+          .bg(t.raised)
+          .border_1()
+          .border_color(t.border)
+          .cursor_pointer()
+          .hover((s) => s.bg(t.hover))
+          .on_click((_e, cx) => this.loadEarlier(cx))
+          .child(svg("mods/agent-chat/icons/arrow-up.svg").size(12).text_color(t.dim))
+          .child(div().text_size(12).text_color(t.dim).child("Load earlier messages"))
+      );
+  }
+
+  /** The floating "Scroll to end" / "New messages" pill over the feed. */
+  renderScrollPill(t, cx) {
+    return h_flex()
+      .absolute()
+      .bottom(8)
+      .left(0)
+      .right(0)
+      .justify_center()
+      .child(
+        h_flex()
+          .id("scroll-to-end-pill")
+          .items_center()
+          .gap(6)
+          .px(12)
+          .py(5)
+          .rounded_full()
+          .bg(t.raised)
+          .border_1()
+          .border_color(t.border)
+          .cursor_pointer()
+          .hover((s) => s.bg(t.hover))
+          .on_click((_e, cx) => this.returnToLive(cx))
+          .child(svg("mods/agent-chat/icons/arrow-down.svg").size(12).text_color(t.foreground))
+          .child(
+            div()
+              .text_size(12)
+              .font_medium()
+              .text_color(t.foreground)
+              .child(this.hasPending ? "New messages" : "Scroll to end")
+          )
+      );
+  }
+
+  /**
+   * The scrolling feed. Rows live in a reversed flex column: the first child is
+   * the visual bottom, so GPUI opens at the newest turn and keeps it there as
+   * content is added. The window is bounded, and older turns load a page at a
+   * time.
+   */
   renderFeed(t, monoFont, cx) {
     if (this.blocks.length === 0) return this.renderEmptyFeed(t);
-    const rows = this.feedRows();
-    return div()
+    const frozen = this.readingBlocks;
+    const start = frozen ? this.readingStart : this.windowStart;
+    const visible = frozen || this.blocks.slice(this.windowStart);
+
+    // Children are pushed bottom-first for the reversed column. A filler at the
+    // very bottom only exists when the whole conversation fits, so a new chat
+    // reads top-down while a long one stays anchored to its tail.
+    const children = [];
+    if (start === 0) children.push(div().w_full().flex_1());
+    children.push(div().w_full().h(24));
+    for (let i = visible.length - 1; i >= 0; i--) {
+      children.push(this.feedRow(visible[i], t, monoFont));
+    }
+    children.push(div().w_full().h(12));
+    if (start > 0) children.push(this.renderLoadEarlier(t, cx));
+
+    return v_flex()
       .id("chat-feed-container")
       .flex_1()
       .min_h(0)
-      .relative()
-      .on_scroll_wheel((e, cx) => this.onFeedWheel(e, cx))
       .child(
-        list(
-          "chat-feed",
-          rows.length,
-          (i) => rows[i].key,
-          (i) => {
-            // Plain bookkeeping only: the renderer may not hold host state.
-            const now = Date.now();
-            this._lastRowAt = now;
-            if (i === rows.length - 1) this._bottomSeenAt = now;
-            return this.renderRow(rows[i], t, monoFont);
-          }
-        )
-          .track_scroll(this.scroll)
-          .size_full()
-          .on_item_click((key, cx) => this.onRowClick(key, cx))
-          .on_item_secondary_click((key, _event, cx) => this.onRowCopy(key, cx))
+        div()
+          .id("chat-feed-viewport")
+          .flex_1()
+          .min_h(0)
+          .w_full()
+          .relative()
+          .on_size_change((size, cx) => this.onFeedResize(size, cx))
+          .on_scroll_wheel((e, cx) => this.onFeedWheel(e, cx))
+          .child(
+            v_flex()
+              .id(this.feedScrollId())
+              .size_full()
+              .flex_col_reverse()
+              .overflow_y_scroll()
+              .on_scroll_wheel((e, cx) => this.onFeedWheel(e, cx))
+              .children(children)
+          )
+          .child(
+            Scrollbar.vertical(this.feedScrollId())
+              .absolute()
+              .inset_0()
+              .on_mouse_down("left", (_e, cx) => this.startReading(cx))
+          )
+          .when(!this.pinned, (el) => el.child(this.renderScrollPill(t, cx)))
       )
-      .child(Scrollbar.vertical("chat-feed").absolute().inset_0());
+      .when(this.status === "working", (el) => el.child(this.renderWorkingBar(t)));
+  }
+
+  /**
+   * The "Working · <what it is doing>" line under the feed, in the same column
+   * as the rows. Shown only while the agent works.
+   * @param {any} t theme
+   */
+  renderWorkingBar(t) {
+    const label = this.activeDetail ? `Working · ${this.activeDetail}` : "Working...";
+    return h_flex()
+      .w_full()
+      .justify_center()
+      .child(
+        v_flex()
+          .w_full()
+          .max_w(COLUMN)
+          .px(24)
+          .child(
+            div()
+              .id("working-timeline-row")
+              .w_full()
+              .py(8)
+              .border_b(1)
+              .border_color(withAlpha(t.border, "60"))
+              .child(
+                h_flex()
+                  .items_center()
+                  .gap(8)
+                  .child(
+                    svg("mods/agent-chat/icons/refresh.svg")
+                      .size(12)
+                      .text_color(t.working)
+                      .when(this._shown, (el) => el.spin(900))
+                  )
+                  .child(div().text_size(13).text_color(t.dim).child(label))
+              )
+          )
+      );
   }
 
   renderEmptyFeed(t) {
