@@ -63,18 +63,39 @@ test("toolTitle prioritizes description, uses basename of file_path, and truncat
   });
   assert.strictEqual(notebookTitle, "View · report.ipynb");
 
-  // truncation over 120
+  // truncation to the 60-character title budget
   const longCommand = "curl -X POST https://example.com/api/v1/resource -H 'Authorization: Bearer test' -H 'Content-Type: application/json' --data '{\"test\":true}'";
-  assert.ok(longCommand.length > 120);
+  assert.ok(longCommand.length > 60);
   const truncated = toolTitle("Bash", { command: longCommand });
   assert.ok(truncated.startsWith("Bash · "));
-  const summaryPart = truncated.slice("Bash · ".length);
-  assert.strictEqual(summaryPart.length, 119); // 118 chars + "…"
-  assert.ok(summaryPart.endsWith("…"));
-  assert.strictEqual(summaryPart, longCommand.slice(0, 118) + "…");
+  assert.ok(truncated.length <= 60);
+  assert.ok(truncated.endsWith("…"));
+  assert.ok(longCommand.startsWith(truncated.slice("Bash · ".length, -1)));
+
+  // only the first line is used
+  assert.strictEqual(toolTitle("Bash", { command: "git status\ngit log --oneline" }), "Bash · git status");
 
   // fallback when no input
   assert.strictEqual(toolTitle("CustomTool"), "CustomTool");
+});
+
+test("toolTitle labels OpenCode execute from its first meaningful code line", () => {
+  const code =
+    'const r = await tools["ai-memory"].memory_query({ query: "x" });\nreturn JSON.stringify(r, null, 2);';
+  const title = toolTitle("execute", { code });
+  assert.ok(title.startsWith("execute · "));
+  assert.ok(title.includes("ai-memory.memory_query"));
+  assert.ok(!title.includes("const"));
+  assert.ok(title.length <= 60);
+
+  const wrapped =
+    'const paths = [\n  "a.md",\n  "b.md",\n];\nfor (const p of paths) {\n  const r = await tools["fs"].read({ path: p });\n}';
+  const wrappedTitle = toolTitle("execute", { code: wrapped });
+  assert.ok(wrappedTitle.includes("fs.read"));
+  assert.ok(!wrappedTitle.includes("const"));
+
+  // No code is no title suffix.
+  assert.strictEqual(toolTitle("execute", {}), "execute");
 });
 
 test("itemsToBlocks handles tool grouping", () => {
@@ -128,4 +149,50 @@ test("itemsToBlocks marks running tool done when !agentWorking", () => {
   // When agentWorking is true, running status is preserved
   const stillWorkingBlocks = itemsToBlocks(singleRunning, true);
   assert.strictEqual(stillWorkingBlocks[0].status, "running");
+});
+
+test("two user turns produce exactly two worked groups with their thoughts and tools", () => {
+  const items = [
+    { type: "user", text: "first" },
+    { type: "thought", text: "plan 1a", status: "done", turn: 10, workedMs: 1000 },
+    { type: "tool", title: "Read · a", action: "read", status: "done", turn: 10, workedMs: 1000, changedFiles: [] },
+    { type: "thought", text: "plan 1b", status: "done", turn: 11, workedMs: 2000 },
+    { type: "tool", title: "Bash · test", action: "command", status: "done", turn: 11, workedMs: 2000, changedFiles: [] },
+    { type: "assistant", text: "first answer", turn: 11, workedMs: 2000 },
+    { type: "user", text: "second" },
+    { type: "thought", text: "plan 2a", status: "done", turn: 20, workedMs: 1500 },
+    { type: "tool", title: "Edit · b", action: "edit", status: "done", turn: 20, workedMs: 1500, changedFiles: ["b.js"] },
+    { type: "thought", text: "plan 2b", status: "done", turn: 21, workedMs: 2500 },
+    { type: "tool", title: "Grep · c", action: "code-search", status: "done", turn: 21, workedMs: 2500, changedFiles: [] },
+    { type: "assistant", text: "second answer", turn: 21, workedMs: 2500 },
+  ];
+  const blocks = itemsToBlocks(items, false);
+  const groups = blocks.filter((block) => block.type === "tool_group");
+  assert.equal(groups.length, 2, "one worked group per user turn");
+  assert.deepEqual(
+    blocks.map((block) => block.type),
+    ["user", "tool_group", "assistant", "user", "tool_group", "assistant"]
+  );
+  assert.deepEqual(groups.map((group) => group.thoughts.length), [2, 2]);
+  assert.deepEqual(groups.map((group) => group.tools.length), [2, 2]);
+  assert.deepEqual(groups.map((group) => group.summary), ["Worked for 3s", "Worked for 4s"]);
+  assert.equal(blocks.filter((block) => block.type === "assistant").length, 2);
+});
+
+test("settingChange reads Claude Code /model and /effort outputs", async () => {
+  const { settingChange } = await import("../mods/agent-chat/transcript-blocks.js");
+  assert.deepStrictEqual(
+    settingChange("<local-command-stdout>Set model to `Sonnet 5.5` and saved as your default for new sessions</local-command-stdout>"),
+    { model: "Sonnet 5.5" }
+  );
+  assert.deepStrictEqual(
+    settingChange("<local-command-stdout>Set model to Opus 5.5 (default) and saved as your default for new sessions</local-command-stdout>"),
+    { model: "Opus 5.5" }
+  );
+  assert.deepStrictEqual(
+    settingChange("<local-command-stdout>Set effort level to xhigh (saved as your default for new sessions): Deeper reasoning</local-command-stdout>"),
+    { effort: "xhigh" }
+  );
+  assert.strictEqual(settingChange("<local-command-stdout>Compacted</local-command-stdout>"), null);
+  assert.strictEqual(settingChange("hello"), null);
 });
