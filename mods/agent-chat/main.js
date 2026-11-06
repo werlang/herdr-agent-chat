@@ -120,6 +120,19 @@ function prettyModel(id) {
 function basename(path) {
   return typeof path === "string" ? path.split("/").pop() || path : "";
 }
+
+/**
+ * Returns a human-readable agent name without duplicating the terminal ID.
+ * @param {any} agent
+ * @param {string|null} terminal
+ * @returns {string}
+ */
+function agentDisplayName(agent, terminal) {
+  const title = (agent?.title || "").trim();
+  if (title && title !== terminal) return title;
+  return agent?.program?.name || title || "Agent";
+}
+
 /**
  * Renders rising effort bars: one per level, from low (1) to max (5).
  * @param {string|null} effortId
@@ -405,6 +418,7 @@ export default class AgentChat extends View {
     this.hostTerminal = p?.terminal || null;
     this.followFocused = !p?.terminal;
     this._paneId = p?.pane || null;
+    this.gitBranch = "";
     this.blocks = [];
     this.activeDetail = "";
     this.status = "idle";
@@ -440,7 +454,7 @@ export default class AgentChat extends View {
 
     this.handle = cx.focus_handle();
 
-    this.input = TextareaState.new({ placeholder: "Message the agent…", value: "", rows: 1 });
+    this.input = TextareaState.new({ placeholder: "Ask anything…", value: "", rows: 1 });
     this.input.set_auto_grow(1, 8);
     this.input.set_soft_wrap(true);
     this.input.on("change", (_e, cx) => cx.notify());
@@ -470,9 +484,31 @@ export default class AgentChat extends View {
       } catch (_e) {}
     });
 
+    this.updateGitBranch();
     this._shown = this.isShown();
     if (this._shown) this.update(cx);
     cx.timer.every(1000, (cx) => this.poll(cx));
+  }
+
+  /**
+   * Reads the current git branch from Herdr's live pane data. The pane already
+   * carries the branch, so this costs no `git` process per poll.
+   */
+  updateGitBranch() {
+    const pane = panes().find((p) => p.terminal === this.terminal && p.branch);
+    this.gitBranch = pane?.branch || spaces().find((s) => s.active)?.branch || "";
+  }
+
+  /** Returns current active workspace or folder name. */
+  workspaceName() {
+    const s = spaces().find((sp) => sp.active);
+    if (s?.name) return s.name;
+    const term = terminals().find((t) => t.address === this.terminal);
+    if (term?.cwd) {
+      const parts = term.cwd.split("/").filter(Boolean);
+      return parts.pop() || "workspace";
+    }
+    return "workspace";
   }
 
   /** Runs an update from an event handler with a context that survives awaits. */
@@ -495,11 +531,13 @@ export default class AgentChat extends View {
     this.setBlocks(this.historyCache.get(address) || []);
     this.rawText = this.rawHistoryCache.get(address) || "";
     this._screenAt = 0;
+    this._readFor = null;
     this._signature = "";
     this._blockKeys = "";
     this._lastText = undefined;
     this.expanded.clear();
     this.returnToLive(cx);
+    this.updateGitBranch();
     this.refreshLater(cx);
   }
 
@@ -563,7 +601,10 @@ export default class AgentChat extends View {
       if (agentApp(findAgent(this.terminal)) === "opencode") this.refreshModels(cx);
 
       // Claude Code: read its own transcript (real Markdown, tool results).
-      if (await this.updateFromTranscript(cx, gen)) return;
+      if (await this.updateFromTranscript(cx, gen)) {
+        this.updateGitBranch();
+        return;
+      }
 
       const res = await hc(["read", this.terminal, "--lines", "200", "--json"]);
       if (gen !== this._generation) return;
@@ -597,6 +638,7 @@ export default class AgentChat extends View {
 
       if (gen !== this._generation) return;
       this.applyBlocks(blocks, cx);
+      this.updateGitBranch();
     } catch (_err) {
       // A failed poll leaves the last good state on screen.
     } finally {
@@ -658,6 +700,12 @@ export default class AgentChat extends View {
    * pill changes.
    */
   applyBlocks(blocks, cx) {
+    if (this._readFor !== this.terminal) {
+      // The first read for this terminal landed: the empty state may now say
+      // "start the conversation" instead of "loading".
+      this._readFor = this.terminal;
+      cx.notify();
+    }
     const blockKeys = blocks.map((b) => b.key).join(",");
     const signature = `${this.status}|${blockKeys}`;
     if (signature === this._signature) return;
@@ -862,6 +910,11 @@ export default class AgentChat extends View {
     });
   }
 
+  /** Stops / interrupts the running agent. */
+  stop(cx) {
+    this.interrupt(cx);
+  }
+
   /** Interrupts the running agent. */
   interrupt(cx) {
     if (!this.terminal) return;
@@ -951,6 +1004,7 @@ export default class AgentChat extends View {
       // Follow focused agent row
       .child(
         h_flex()
+          .id("pick-follow-focused")
           .items_center()
           .justify_between()
           .px(8)
@@ -963,10 +1017,7 @@ export default class AgentChat extends View {
           .on_click((_e, cx) => {
             this.followFocused = !this.followFocused;
             if (this.followFocused) {
-              this.terminal = resolveTerminal();
-              this.blocks = this.historyCache.get(this.terminal) || [];
-              this.rawText = this.rawHistoryCache.get(this.terminal) || "";
-              this.refreshLater(cx);
+              this.switchTo(resolveTerminal(), cx);
             }
             this.pickerOpen = false;
             cx.notify();
@@ -1014,12 +1065,9 @@ export default class AgentChat extends View {
                 .cursor_pointer()
                 .hover((s) => s.bg(t.hover))
                 .on_click((_e, cx) => {
-                  this.terminal = ag.address;
                   this.followFocused = false;
                   this.pickerOpen = false;
-                  this.blocks = this.historyCache.get(this.terminal) || [];
-                  this.rawText = this.rawHistoryCache.get(this.terminal) || "";
-                  this.refreshLater(cx);
+                  this.switchTo(ag.address, cx);
                 })
                 .child(
                   h_flex()
@@ -1087,12 +1135,9 @@ export default class AgentChat extends View {
                 .cursor_pointer()
                 .hover((s) => s.bg(t.hover))
                 .on_click((_e, cx) => {
-                  this.terminal = term.address;
                   this.followFocused = false;
                   this.pickerOpen = false;
-                  this.blocks = this.historyCache.get(this.terminal) || [];
-                  this.rawText = this.rawHistoryCache.get(this.terminal) || "";
-                  this.refreshLater(cx);
+                  this.switchTo(term.address, cx);
                 })
                 .child(
                   h_flex()
@@ -1145,59 +1190,28 @@ export default class AgentChat extends View {
                 );
             }),
           ])
-      )
-      // Launch New Agent section
-      .when(this.known.length > 0, (el) =>
-        el.child(
-          v_flex()
-            .gap(4)
-            .child(div().px(4).text_size(10.5).font_semibold().text_color(t.dim).child("+ NEW AGENT"))
-            .child(
-              h_flex()
-                .gap(6)
-                .children(
-                  this.known.map((k) =>
-                    h_flex()
-                      .id(`known-${k.key}`)
-                      .items_center()
-                      .gap(6)
-                      .px(8)
-                      .py(4)
-                      .rounded(6)
-                      .bg(t.background)
-                      .border_1()
-                      .border_color(t.border)
-                      .cursor_pointer()
-                      .hover((s) => s.bg(t.hover))
-                      .on_click((_e, _cx) => {
-                        run("terminal.open", { argv: k.run });
-                        this.pickerOpen = false;
-                      })
-                      .child(iconFor(k, 13, t.accent))
-                      .child(div().text_size(11.5).font_medium().text_color(t.foreground).child(k.name))
-                  )
-                )
-            )
-        )
       );
   }
 
-
-  /** Approval chips, shown above the composer while the agent waits. */
-  renderQuickActions(t, cx) {
+  /**
+   * Pending approval banner card docked above the composer while the agent waits.
+   */
+  renderPendingApprovalActions(t, cx) {
     if (this.status !== "blocked") return null;
-    const chip = (id, label, onClick, primary) =>
+
+    const btn = (id, label, onClick, primary = false) =>
       div()
         .id(id)
         .px(12)
-        .h(30)
+        .h(28)
         .flex()
         .items_center()
-        .rounded_full()
+        .justify_center()
+        .rounded(6)
         .border_1()
-        .border_color(primary ? t.foreground : t.border)
-        .bg(primary ? t.foreground : t.background)
-        .text_color(primary ? t.background : t.foreground)
+        .border_color(primary ? t.blocked : t.border)
+        .bg(primary ? t.blocked : t.raised)
+        .text_color(primary ? (t.background || "#ffffff") : t.foreground)
         .text_size(12)
         .font_medium()
         .cursor_pointer()
@@ -1205,27 +1219,41 @@ export default class AgentChat extends View {
         .on_click((_e, cx) => onClick(cx))
         .child(label);
 
-    return h_flex()
-      .id("chat-actions")
+    return v_flex()
+      .id("pending-approval-card")
       .w_full()
       .max_w(COLUMN)
-      .flex_wrap()
-      .gap(6)
-      .pb(10)
-      .items_center()
+      .mb(10)
+      .p(12)
+      .gap(8)
+      .rounded(12)
+      .bg(withAlpha(t.blocked, "14"))
+      .border_1()
+      .border_color(t.blocked)
       .child(
         h_flex()
           .items_center()
-          .gap(6)
-          .pr(4)
-          .child(div().size(7).rounded_full().bg(t.blocked))
-          .child(div().text_size(12).font_medium().text_color(t.blocked).child("Needs your input"))
+          .gap(8)
+          .child(svg("mods/agent-chat/icons/shield-alert.svg").size(16).text_color(t.blocked))
+          .child(
+            div()
+              .text_size(13)
+              .font_semibold()
+              .text_color(t.blocked)
+              .child("Waiting for approval")
+          )
       )
-      .child(chip("act-approve", "Approve", (cx) => this.sendKey("enter", cx), true))
-      .child(chip("act-yes", "Yes", (cx) => this.sendKeys(["y", "enter"], cx), false))
-      .child(chip("act-no", "No", (cx) => this.sendKeys(["n", "enter"], cx), false))
-      .child(chip("act-opt2", "Option 2", (cx) => this.sendKeys(["down", "enter"], cx), false))
-      .child(chip("act-cancel", "Cancel", (cx) => this.sendKey("esc", cx), false));
+      .child(
+        h_flex()
+          .items_center()
+          .gap(8)
+          .flex_wrap()
+          .child(btn("act-approve", "Approve (Enter)", (cx) => this.sendKey("enter", cx), true))
+          .child(btn("act-yes", "Yes (y)", (cx) => this.sendKeys(["y", "enter"], cx)))
+          .child(btn("act-opt2", "Option 2 (2)", (cx) => this.sendKeys(["down", "enter"], cx)))
+          .child(btn("act-no", "No (n)", (cx) => this.sendKeys(["n", "enter"], cx)))
+          .child(btn("act-cancel", "Cancel (Esc)", (cx) => this.sendKey("esc", cx)))
+      );
   }
 
   /**
@@ -1955,18 +1983,35 @@ export default class AgentChat extends View {
   }
 
   renderEmptyFeed(t) {
-    const agent = agents().find((a) => a.address === this.terminal);
-    const name = agent?.title || agent?.program?.name || "the agent";
+    const agent = findAgent(this.terminal);
+    const agentName = agentDisplayName(agent, this.terminal);
+    const wsName = this.workspaceName();
+
     return v_flex()
       .id("chat-empty-feed")
       .flex_1()
       .min_h(0)
       .items_center()
       .justify_center()
-      .gap(10)
-      .child(iconFor(agent?.program, 28, t.dim))
-      .child(div().text_size(22).font_semibold().text_color(t.foreground).child(`What should ${name} work on?`))
-      .child(div().text_size(13).text_color(t.dim).child("Messages are typed into the agent's terminal."));
+      .gap(12)
+      .child(iconFor(agent?.program, 32, t.dim))
+      .child(
+        div()
+          .text_size(20)
+          .font_semibold()
+          .text_color(t.foreground)
+          .child(`${agentName} · ${wsName}`)
+      )
+      .child(
+        div()
+          .text_size(13)
+          .text_color(t.dim)
+          .child(
+            this.terminal && this._readFor !== this.terminal
+              ? "Loading conversation…"
+              : "Send a message to start the conversation."
+          )
+      );
   }
 
   /** `{ model, effort }` display names; either may be null when it cannot be told. */
@@ -2359,15 +2404,25 @@ export default class AgentChat extends View {
       );
   }
 
+  /**
+   * Main composer surface with the model/effort trigger, primary actions, and
+   * the bottom workspace context strip.
+   */
   renderComposer(t, cx) {
-    const hasText = Boolean((this.input.value() || "").trim()) || this.attached > 0;
+    const rawVal = this.input.value() || "";
+    const hasText = Boolean(rawVal.trim()) || this.attached > 0;
     const working = this.status === "working";
-    const actions = this.renderQuickActions(t, cx);
+    const agent = findAgent(this.terminal);
+    const monoFont = settings().font_family ?? "JetBrains Mono";
+
+    const approvalCard = this.renderPendingApprovalActions(t, cx);
     const picker = this.pickerOpen
-      ? this.renderAgentPicker(t, settings().font_family ?? "JetBrains Mono", cx)
+      ? this.renderAgentPicker(t, monoFont, cx)
       : this.modelMenuOpen
       ? this.renderModelMenu(t, cx)
       : null;
+
+    const currentModelInfo = this.currentModelInfo();
 
     return v_flex()
       .id("chat-composer-area")
@@ -2378,6 +2433,9 @@ export default class AgentChat extends View {
       .pt(4)
       .pb(12)
       .bg(t.background)
+      // Pending approvals card docked above composer
+      .when(Boolean(approvalCard), (el) => el.child(approvalCard))
+      // Popover drawers (agent picker or model menu)
       .when(Boolean(picker), (el) =>
         el.child(
           div()
@@ -2391,135 +2449,320 @@ export default class AgentChat extends View {
             .child(picker)
         )
       )
-      .when(Boolean(actions), (el) => el.child(actions))
+      // Composer surface card
       .child(
         v_flex()
           .id("chat-composer")
           .w_full()
           .max_w(COLUMN)
-          .px(18)
-          .pt(12)
+          .px(16)
+          .pt(10)
           .pb(10)
           .gap(8)
-          .rounded(26)
+          .rounded(16)
           .bg(t.raised)
           .border_1()
-          .border_color(this.inputFocused ? withAlpha(t.foreground, "40") : t.border)
-          .child(Textarea.new(this.input).w_full().min_h(24).text_size(14).text_color(t.foreground))
+          .border_color(
+            this.status === "blocked"
+              ? t.blocked
+              : this.inputFocused
+              ? withAlpha(t.foreground, "40")
+              : t.border
+          )
+          // Top attachment strip
+          .when(this.attached > 0, (el) =>
+            el.child(
+              h_flex()
+                .items_center()
+                .gap(6)
+                .px(8)
+                .py(4)
+                .rounded(6)
+                .bg(t.background)
+                .border_1()
+                .border_color(t.border)
+                .child(
+                  div()
+                    .text_size(12)
+                    .text_color(t.foreground)
+                    .child(this.attached === 1 ? "🖼 Image attached" : `🖼 ${this.attached} images attached`)
+                )
+                .child(
+                  div()
+                    .id("clear-attachment")
+                    .cursor_pointer()
+                    .text_size(14)
+                    .text_color(t.dim)
+                    .hover((s) => s.text_color(t.ansi1 || "#ef4444"))
+                    .on_click((_e, cx) => {
+                      this.attached = 0;
+                      cx.notify();
+                    })
+                    .child("×")
+                )
+            )
+          )
+          // Input textarea
+          .child(
+            Textarea.new(this.input)
+              .w_full()
+              .min_h(28)
+              .text_size(14)
+              .text_color(t.foreground)
+          )
+          // Composer footer controls bar
           .child(
             h_flex()
+              .w_full()
               .items_center()
-              .gap(8)
+              .justify_between()
+              .pt(4)
+              // Left: Attach & Plan Mode
               .child(
-                // Model picker: what the agent runs on. Click to choose another.
                 h_flex()
-                  .id("model-picker-trigger")
                   .items_center()
-                  .gap(6)
-                  .px(10)
-                  .h(28)
-                  .rounded_full()
-                  .cursor_pointer()
-                  .when(this.modelMenuOpen, (el) => el.bg(t.hover))
-                  .hover((s) => s.bg(t.hover))
-                  .on_click((_e, cx) => {
-                    this.modelMenuOpen = !this.modelMenuOpen;
-                    this.pickerOpen = false;
-                    if (this.modelMenuOpen) this.refreshModels(cx);
-                    cx.notify();
-                  })
-                  .child(div().text_size(12.5).font_medium().text_color(t.foreground).child(this.currentModelInfo().model || "Model"))
-                  .when(Boolean(this.currentModelInfo().effort), (el) =>
-                    el.child(div().text_size(12.5).text_color(t.dim).child(this.currentModelInfo().effort))
-                  )
-                  .child(svg("mods/agent-chat/icons/chevron-down.svg").size(11).text_color(t.dim))
-              )
-              .when(this.attached > 0, (el) =>
-                el.child(
-                  h_flex()
-                    .items_center()
-                    .gap(5)
-                    .px(10)
-                    .h(28)
-                    .rounded_full()
-                    .bg(t.background)
-                    .child(div().text_size(12).text_color(t.foreground).child(
-                      this.attached === 1 ? "🖼 Image attached" : `🖼 ${this.attached} images attached`
-                    ))
-                )
-              )
-              .child(div().flex_1())
-              .child(
-                div()
-                  .id(working ? "chat-stop" : "chat-send")
-                  .size(34)
-                  .flex()
-                  .items_center()
-                  .justify_center()
-                  .rounded_full()
-                  .bg(working || hasText ? t.foreground : t.hover)
-                  .cursor_pointer()
-                  .hover((s) => s.opacity(0.85))
-                  .on_click((_e, cx) => (working && !hasText ? this.interrupt(cx) : this.send(cx)))
+                  .gap(8)
                   .child(
-                    svg(working && !hasText ? "mods/agent-chat/icons/stop.svg" : "mods/agent-chat/icons/send.svg")
-                      .size(14)
-                      .text_color(working || hasText ? t.background : t.dim)
+                    h_flex()
+                      .id("composer-attach")
+                      .items_center()
+                      .gap(4)
+                      .px(8)
+                      .py(4)
+                      .rounded(6)
+                      .cursor_pointer()
+                      .hover((s) => s.bg(t.hover))
+                      .on_click((_e, cx) => this.pasteImage(cx))
+                      .child(svg("mods/agent-chat/icons/paperclip.svg").size(14).text_color(t.dim))
+                      .child(div().text_size(12).font_medium().text_color(t.dim).child("Attach"))
+                  )
+                  .child(
+                    h_flex()
+                      .id("composer-plan-mode")
+                      .items_center()
+                      .px(8)
+                      .py(4)
+                      .rounded(6)
+                      .cursor_pointer()
+                      .hover((s) => s.bg(t.hover))
+                      .on_click((_e, cx) => this.chooseModel("/plan", cx))
+                      .child(div().text_size(12).font_medium().text_color(t.dim).child("Plan"))
+                  )
+              )
+              // Right: Model + Effort trigger & Primary Action button
+              .child(
+                h_flex()
+                  .items_center()
+                  .gap(8)
+                  // Model + Effort Trigger
+                  .child(
+                    h_flex()
+                      .id("model-picker-trigger")
+                      .items_center()
+                      .gap(6)
+                      .px(10)
+                      .h(28)
+                      .rounded(8)
+                      .cursor_pointer()
+                      .when(this.modelMenuOpen, (el) => el.bg(t.hover))
+                      .hover((s) => s.bg(t.hover))
+                      .on_click((_e, cx) => {
+                        this.modelMenuOpen = !this.modelMenuOpen;
+                        this.pickerOpen = false;
+                        if (this.modelMenuOpen) this.refreshModels(cx);
+                        cx.notify();
+                      })
+                      .child(
+                        div()
+                          .text_size(12)
+                          .font_medium()
+                          .text_color(t.foreground)
+                          .child(currentModelInfo.model || "Model")
+                      )
+                      .when(Boolean(currentModelInfo.effort), (el) =>
+                        el.child(div().text_size(11.5).text_color(t.dim).child(currentModelInfo.effort))
+                      )
+                      .child(renderEffortGlyph(currentModelInfo.effort, t, true))
+                      .child(svg("mods/agent-chat/icons/chevron-down.svg").size(11).text_color(t.dim))
+                  )
+                  // Primary Action Button (Stop / Steer / Send)
+                  .child(
+                    div()
+                      .id(working && !hasText ? "chat-stop" : working && hasText ? "chat-steer" : "chat-send")
+                      .size(32)
+                      .flex()
+                      .items_center()
+                      .justify_center()
+                      .rounded_full()
+                      .bg(
+                        working && !hasText
+                          ? (t.ansi1 || "#ef4444")
+                          : working && hasText
+                          ? t.accent
+                          : hasText
+                          ? t.accent
+                          : t.hover
+                      )
+                      .opacity(working || hasText ? 1.0 : 0.38)
+                      .cursor_pointer()
+                      .hover((s) => s.opacity(0.85))
+                      .on_click((_e, cx) => {
+                        if (working && !hasText) {
+                          this.stop(cx);
+                        } else {
+                          this.send(cx);
+                        }
+                      })
+                      .child(
+                        working && !hasText
+                          ? svg("mods/agent-chat/icons/stop.svg").size(14).text_color("#ffffff")
+                          : working && hasText
+                          ? svg("mods/agent-chat/icons/corner-up-right.svg").size(14).text_color("#ffffff")
+                          : svg("mods/agent-chat/icons/send.svg")
+                              .size(14)
+                              .text_color(hasText ? "#ffffff" : t.foreground)
+                      )
                   )
               )
           )
       )
+      // Bottom context strip
       .child(
-        div()
+        h_flex()
+          .id("composer-context-strip")
+          .w_full()
+          .max_w(COLUMN)
           .pt(6)
-          .text_size(11)
-          .text_color(t.dim)
-          .child(this.notice || "Click thinking or tools to expand · right-click a message to copy")
+          .px(6)
+          .gap(8)
+          .items_center()
+          .justify_between()
+          // Left: Folder & Git Branch
+          .child(
+            h_flex()
+              .flex_1()
+              .min_w(0)
+              .items_center()
+              .gap(10)
+              .child(
+                h_flex()
+                  .min_w(0)
+                  .items_center()
+                  .gap(4)
+                  .child(svg("mods/agent-chat/icons/folder.svg").size(12).flex_none().text_color(t.dim))
+                  .child(div().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(this.workspaceName()))
+              )
+              .when(Boolean(this.gitBranch), (el) =>
+                el.child(
+                  h_flex()
+                    .min_w(0)
+                    .items_center()
+                    .gap(4)
+                    .child(svg("mods/agent-chat/icons/git-branch.svg").size(12).flex_none().text_color(t.dim))
+                    .child(div().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(this.gitBranch))
+                )
+              )
+          )
+          // Right: Notice or keyboard hint
+          .child(
+            div()
+              .flex_none()
+              .text_size(11)
+              .text_color(this.notice ? t.accent : t.dim)
+              .child(this.notice || "Enter to send · Shift+Enter newline · Right-click a message to copy")
+          )
       );
   }
 
   /**
    * Builds every branch once so `herdr-app check` (which has no terminal)
-   * validates the whole surface, including rows the list would only build on
+   * validates the whole surface, including rows the feed only builds on
    * screen.
    */
   renderVerificationSample(t, monoFont, cx) {
     const samples = assignKeys([
       { type: "user", text: "test prompt" },
-      { type: "thought", text: "test thought", duration: "1s", summary: "test" },
-      { type: "thought", text: "streaming", status: "running" },
-      { type: "tool", title: "test tool", detail: "output", status: "done" },
-      { type: "tool", title: "running tool", status: "running" },
+      {
+        type: "user",
+        text: "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12",
+      },
+      { type: "thought", text: "**Analyzing code** to find references.", duration: "1s", summary: "test" },
+      { type: "thought", text: "Streaming live thought sentence without heading.", status: "running" },
+      { type: "tool", title: "read file", detail: "read content", status: "done", action: "read" },
+      { type: "tool", title: "edit file", detail: "diff", status: "done", action: "edit", changedFiles: ["main.js"] },
+      { type: "tool", title: "run tests", detail: "exit 0", status: "done", action: "command" },
+      { type: "tool", title: "grep search", detail: "match", status: "done", action: "code-search" },
+      { type: "tool", title: "web search", detail: "results", status: "done", action: "search" },
+      { type: "tool", title: "failed command", detail: "exit 1", status: "error", hasFailure: true, action: "command" },
+      { type: "tool", title: "running tool", status: "running", action: "other" },
       {
         type: "tool_group",
         count: 2,
-        tools: [{ title: "t1", detail: "d1", status: "done" }, { title: "t2", status: "running" }],
-        status: "done",
+        tools: [
+          { title: "t1", detail: "d1", status: "done", action: "edit", changedFiles: ["foo.js"] },
+          { title: "t2", status: "error", hasFailure: true, action: "command" },
+        ],
+        summary: "Changed 1 file and ran 1 command",
+        summaryKind: "mixed",
+        hasFailure: true,
+        changedFiles: ["foo.js"],
+        status: "running",
       },
-      { type: "assistant", text: "test **markdown**\n\n| a | b |\n|---|---|\n| 1 | 2 |" },
+      {
+        type: "assistant",
+        text: "test **markdown**\n\n| a | b |\n|---|---|\n| 1 | 2 |",
+        changedFiles: ["foo.js", "main.js"],
+      },
     ]);
     const saved = {
       pickerOpen: this.pickerOpen,
+      modelMenuOpen: this.modelMenuOpen,
       known: this.known,
       status: this.status,
       rawText: this.rawText,
       blocks: this.blocks,
+      activeDetail: this.activeDetail,
+      pinned: this.pinned,
+      readingBlocks: this.readingBlocks,
+      readingStart: this.readingStart,
+      windowStart: this.windowStart,
+      hasPending: this.hasPending,
+      _feedId: this._feedId,
+      _drawnStatus: this._drawnStatus,
+      gitBranch: this.gitBranch,
     };
     const out = [];
     this.pickerOpen = true;
-    if (!this.known || this.known.length === 0) this.known = [{ key: "test-agent", name: "Test Agent", run: ["test"] }];
+    this.modelMenuOpen = true;
+    this.gitBranch = "main";
+    if (!this.known || this.known.length === 0) {
+      this.known = [{ key: "test-agent", name: "Test Agent", run: ["test"] }];
+    }
     this.status = "blocked";
     this.rawText = "Sample raw terminal output\nLine 2";
-    this.blocks = samples;
-    out.push(this.renderAgentPicker(t, monoFont, cx), this.renderModelMenu(t, cx), this.renderComposer(t, cx));
+    this.setBlocks(samples);
+    this.windowStart = 0;
+    this.readingBlocks = null;
+    this.pinned = false;
+
+    out.push(
+      this.renderAgentPicker(t, monoFont, cx),
+      this.renderModelMenu(t, cx),
+      this.renderPendingApprovalActions(t, cx),
+      this.renderComposer(t, cx)
+    );
     out.push(this.renderFeed(t, monoFont, cx), this.renderEmptyFeed(t));
+
     this.status = "working";
+    out.push(this.renderComposer(t, cx));
+    out.push(this.renderWorkingBar(t));
     out.push(...this.feedRows().map((b) => this.renderRow(b, t, monoFont)));
     for (const b of samples) this.expanded.add(b.ekey);
     this.copiedKey = samples[0].ekey;
     out.push(...samples.map((b) => this.renderRow(b, t, monoFont)));
     for (const b of samples) this.expanded.delete(b.ekey);
     this.copiedKey = null;
+
     Object.assign(this, saved);
     return v_flex().children(out.filter(Boolean));
   }
