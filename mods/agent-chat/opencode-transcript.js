@@ -12,9 +12,10 @@
 // `time_updated` moved are fetched.
 import { exec, agents, terminals, home } from "herdr";
 import * as fs from "fs/promises";
-import { textOf, clip, toolTitle, itemsToBlocks } from "./transcript-blocks.js";
+import { itemsToBlocks } from "./transcript-blocks.js";
+import { buildOpenCodePollQuery, OpenCodeItemCache } from "./opencode-data.js";
 
-const q = (s) => `'${String(s).replace(/'/g, "''")}'`;
+export { textOf, clip, toolTitle, classifyTool, itemsToBlocks } from "./transcript-blocks.js";
 
 /**
  * Formats a model id into a human-readable name.
@@ -34,11 +35,16 @@ export class OpenCodeTranscript {
   constructor(terminal) {
     this.terminal = terminal;
     this.sessionId = null;
-    this.messages = new Map(); // seq → parsed row
+    this.messages = new Map(); // seq → { type, data, raw }
     this.since = 0;
     this.model = null;
     this.provider = null;
     this.effort = null;
+    this.sessionModel = false; // true once session_v2 has supplied a model
+    this._blocks = null;
+    this._working = null;
+    this.itemsCache = new OpenCodeItemCache();
+    this.itemRebuilds = 0;
   }
 
   get db() {
@@ -65,40 +71,21 @@ export class OpenCodeTranscript {
     return text.trim() ? JSON.parse(text) : [];
   }
 
-  /** The session this terminal's TUI shows, or null. */
-  async locate() {
-    const agent = agents().find((a) => a.address === this.terminal);
-    const term = terminals().find((t) => t.address === this.terminal);
-    const title = (agent?.title || "").replace(/^OC\s*\|\s*/, "").trim();
-    const cwd = term?.cwd || null;
-    const where = [
-      "parent_id is null",
-      title ? `title = ${q(title)}` : null,
-      !title && cwd ? `directory = ${q(cwd)}` : null,
-    ]
-      .filter(Boolean)
-      .join(" and ");
-    const orderBy =
-      title && cwd
-        ? `(directory = ${q(cwd)}) desc, time_updated desc`
-        : "time_updated desc";
-    const rows = await this.sql(
-      `select id, model from session_v2 where ${where} order by ${orderBy} limit 1`
-    );
-    const row = rows?.[0];
-    if (!row) return null;
-    if (row.id !== this.sessionId) {
-      this.sessionId = row.id;
-      this.messages = new Map();
-      this.since = 0;
-    }
+  /**
+   * Applies the model stored on the resolved `session_v2` row.
+   * @param {any} row
+   */
+  applySession(row) {
     try {
       const model = JSON.parse(row.model || "null");
-      this.model = model?.id || this.model;
-      this.provider = model?.providerID || this.provider || null;
-      this.effort = model?.variant && model.variant !== "default" ? model.variant : null;
+      if (!model?.id) return;
+      // The session row is the source of truth: a model picked in the TUI or
+      // through the API lands here before any new assistant message exists.
+      this.sessionModel = true;
+      this.model = model.id;
+      this.provider = model.providerID || null;
+      this.effort = model.variant && model.variant !== "default" ? model.variant : null;
     } catch (_e) {}
-    return row.id;
   }
 
   /** Model name for the picker. */
@@ -108,55 +95,62 @@ export class OpenCodeTranscript {
 
   async refresh(agentWorking) {
     const before = this.sessionId;
-    if (!(await this.locate())) return null;
+    const agent = agents().find((a) => a.address === this.terminal);
+    const term = terminals().find((t) => t.address === this.terminal);
+    const title = (agent?.title || "").replace(/^OC\s*\|\s*/, "").trim();
+    const cwd = term?.cwd || null;
+    this.itemsCache.rebuilds = 0;
+
+    // One sqlite3 process resolves the session and returns its changed rows.
     const rows = await this.sql(
-      `select seq, type, time_updated, data from session_message where session_id = ${q(this.sessionId)} and time_updated >= ${this.since} order by seq`
+      buildOpenCodePollQuery({ title, cwd, since: this.since, knownSessionId: before })
     );
     if (!rows) return null;
+    const sessionRow = rows.find((row) => row.kind === "session");
+    if (!sessionRow) return null;
+
+    const changedSession = sessionRow.id !== this.sessionId;
+    if (changedSession) {
+      this.sessionId = sessionRow.id;
+      this.sessionModel = false;
+      this.messages = new Map();
+      this.since = 0;
+      this._blocks = null;
+      this.itemsCache.clear();
+    }
+    this.applySession(sessionRow);
+
+    let changed = changedSession;
     for (const row of rows) {
+      if (row.kind !== "message") continue;
       this.since = Math.max(this.since, row.time_updated);
+      const prev = this.messages.get(row.seq);
+      // The newest row is re-read every poll (`>=`); only a different raw row
+      // is new work, so an idle transcript rebuilds nothing.
+      if (prev && prev.type === row.type && prev.raw === row.data) continue;
       try {
-        this.messages.set(row.seq, { type: row.type, data: JSON.parse(row.data) });
+        const data = JSON.parse(row.data);
+        this.messages.set(row.seq, { type: row.type, data, raw: row.data });
+        this.itemsCache.set(row.seq, row.type, data);
+        changed = true;
       } catch (_e) {}
     }
-    const changed = rows.length > 0 || before !== this.sessionId || agentWorking !== this._working;
+    if (agentWorking !== this._working) changed = true;
     this._working = agentWorking;
-    return { blocks: itemsToBlocks(this.items(), agentWorking), changed };
+    if (changed || !this._blocks) this._blocks = itemsToBlocks(this.items(), agentWorking);
+    this.itemRebuilds = this.itemsCache.rebuilds;
+    return { blocks: this._blocks, changed };
   }
 
   /** Messages in order as chat items (user, thought, assistant, tool). */
   items() {
-    const out = [];
-    const seqs = [...this.messages.keys()].sort((a, b) => a - b);
-    for (const seq of seqs) {
-      const { type, data } = this.messages.get(seq);
-      if (type === "user") {
-        const files = Array.isArray(data.files) ? data.files.length : 0;
-        let text = (data.text || "").trim();
-        if (files) text = `${text}${text ? "\n\n" : ""}${files === 1 ? "🖼 1 file" : `🖼 ${files} files`}`;
-        if (text) out.push({ type: "user", text });
-        continue;
-      }
-      if (type !== "assistant" || !Array.isArray(data.content)) continue;
-      if (data.model?.id) {
-        this.model = data.model.id;
-        this.effort = data.model.variant && data.model.variant !== "default" ? data.model.variant : null;
-      }
-      for (const part of data.content) {
-        if (part?.type === "reasoning" && part.text?.trim()) {
-          out.push({ type: "thought", text: part.text, status: "done" });
-        } else if (part?.type === "text" && part.text?.trim()) {
-          const last = out[out.length - 1];
-          if (last?.type === "assistant" && last.seq === seq) last.text += `\n\n${part.text}`;
-          else out.push({ type: "assistant", text: part.text, seq });
-        } else if (part?.type === "tool") {
-          const state = part.state || {};
-          const status = state.status === "completed" ? "done" : state.status === "error" ? "error" : "running";
-          const detail = clip(textOf(state.content) || state.output || state.error || "");
-          out.push({ type: "tool", title: toolTitle(part.name, state.input), detail, status });
-        }
-      }
+    const { items, model, effort, hasModel } = this.itemsCache.collect(this.messages);
+    // Older assistant rows must not overwrite a session-level model that is
+    // already known, or a switch would revert on the next poll.
+    if (hasModel && !this.sessionModel) {
+      this.model = model;
+      this.effort = effort;
     }
-    return out;
+    return items;
   }
 }
