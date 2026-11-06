@@ -113,6 +113,14 @@ function prettyModel(id) {
 }
 
 /**
+ * Returns the final path segment of a file path.
+ * @param {string} path
+ * @returns {string}
+ */
+function basename(path) {
+  return typeof path === "string" ? path.split("/").pop() || path : "";
+}
+/**
  * Renders rising effort bars: one per level, from low (1) to max (5).
  * @param {string|null} effortId
  * @param {any} t
@@ -143,6 +151,32 @@ function renderEffortGlyph(effortId, t, highlightMax = false) {
     );
 }
 
+/**
+ * Returns the SVG icon path corresponding to a semantic tool action.
+ * @param {string} action
+ * @returns {string}
+ */
+function toolActionIcon(action) {
+  switch (action) {
+    case "read":
+      return "mods/agent-chat/icons/eye.svg";
+    case "edit":
+      return "mods/agent-chat/icons/square-pen.svg";
+    case "command":
+      return "mods/agent-chat/icons/terminal.svg";
+    case "code-search":
+      return "mods/agent-chat/icons/search.svg";
+    case "search":
+      return "mods/agent-chat/icons/globe.svg";
+    case "reasoning":
+    case "thought":
+      return "mods/agent-chat/icons/brain.svg";
+    case "other":
+    case "mixed":
+    default:
+      return "mods/agent-chat/icons/wrench.svg";
+  }
+}
 
 /**
  * Claude Code's model and effort as its screen shows them: the welcome banner
@@ -852,6 +886,15 @@ export default class AgentChat extends View {
     const block =
       this.blocks.find((b) => b.key === key) || this.readingBlocks?.find((b) => b.key === key);
     if (!block) return;
+    if (block.type === "user") {
+      const lines = (block.text || "").split("\n");
+      if (lines.length > 10 || (block.text || "").length > 600) {
+        if (this.expanded.has(block.ekey)) this.expanded.delete(block.ekey);
+        else this.expanded.add(block.ekey);
+        cx.notify();
+      }
+      return;
+    }
     if (block.type === "assistant" || block.type === "notice") return;
     if (this.expanded.has(block.ekey)) this.expanded.delete(block.ekey);
     else this.expanded.add(block.ekey);
@@ -1209,38 +1252,137 @@ export default class AgentChat extends View {
         .child(div().text_size(11).text_color(t.done).child("Copied"));
 
     if (block.type === "user") {
+      const isLong = Boolean(block.isLong);
+      const isExpanded = this.expanded.has(block.ekey);
+      let displayText = block.text || "";
+      if (isLong && !isExpanded) {
+        displayText = block.preview;
+      }
+
       return column(
         v_flex()
           .w_full()
           .items_end()
-          .pt(22)
+          .pt(18)
           .pb(6)
+          // A message from another agent (`hc send`): say who sent it.
+          .when(Boolean(block.from), (el) =>
+            el.child(
+              div()
+                .pb(4)
+                .pr(4)
+                .text_size(11)
+                .text_color(t.dim)
+                .child(`from ${block.from}`)
+            )
+          )
           .child(
-            div()
+            v_flex()
               .max_w(560)
-              .px(16)
+              .px(14)
               .py(10)
-              .rounded(20)
+              .rounded(16)
               .bg(t.raised)
-              .text_size(14)
-              .line_height("22px")
-              .text_color(t.foreground)
-              .child(block.text)
+              .border_1()
+              .border_color(withAlpha(t.border, "70"))
+              .cursor_pointer()
+              .child(
+                div()
+                  .text_size(14)
+                  .line_height("22px")
+                  .text_color(t.foreground)
+                  .child(displayText)
+              )
+              .when(isLong, (el) =>
+                el.child(
+                  div()
+                    .pt(6)
+                    .text_size(11.5)
+                    .font_medium()
+                    .text_color(t.accent)
+                    .child(
+                      isExpanded
+                        ? "Show less"
+                        : `Show full message (${block.lineCount} lines)`
+                    )
+                )
+              )
           )
           .when(copied, (el) => el.child(copiedNote()))
       );
     }
 
     if (block.type === "assistant") {
+      const changedFiles = block.changedFiles || [];
+
       return column(
         v_flex()
           .w_full()
           .py(8)
-          .text_size(14)
-          .line_height("24px")
-          .text_color(t.foreground)
-          .child(TextView.markdown(`md-${block.key}`, block.text || "").selectable(true))
-          .when(copied, (el) => el.child(copiedNote()))
+          .gap(6)
+          .child(
+            div()
+              .w_full()
+              .text_size(14)
+              .line_height("24px")
+              .text_color(t.foreground)
+              .child(
+                v_flex()
+                  .w_full()
+                  .gap(0)
+                  .children(
+                    (block.mdChunks || [{ id: `md-${block.key}`, text: block.text || "" }]).map((c) =>
+                      c.image
+                        ? this.renderImageRef(c.image, t, monoFont)
+                        : TextView.markdown(c.id, c.text).selectable(true)
+                    )
+                  )
+              )
+          )
+          // Assistant Message Meta bar
+          .child(
+            h_flex()
+              .w_full()
+              .items_center()
+              .justify_between()
+              .pt(4)
+              .child(
+                h_flex()
+                  .items_center()
+                  .gap(6)
+                  .flex_wrap()
+                  .when(changedFiles.length > 0, (el) =>
+                    el
+                      .child(svg("mods/agent-chat/icons/square-pen.svg").size(12).text_color(t.dim))
+                      .children(
+                        changedFiles.slice(0, 5).map((f) =>
+                          div()
+                            .px(6)
+                            .py(1.5)
+                            .rounded(4)
+                            .bg(t.raised)
+                            .border_1()
+                            .border_color(t.border)
+                            .font_family(monoFont)
+                            .text_size(11)
+                            .text_color(t.dim)
+                            .child(basename(f))
+                        )
+                      )
+                  )
+              )
+              // Only the confirmation: a "Right-click to copy" hint under every
+              // reply is noise, so the tip lives once in the composer footer.
+              .when(copied, (el) =>
+                el.child(
+                  h_flex()
+                    .items_center()
+                    .gap(4)
+                    .child(svg("mods/agent-chat/icons/check.svg").size(11).text_color(t.done))
+                    .child(div().text_size(11).text_color(t.done).child("Copied"))
+                )
+              )
+          )
       );
     }
 
@@ -1260,45 +1402,101 @@ export default class AgentChat extends View {
         .font_family(monoFont)
         .text_color(t.dim)
         .child(text);
-    const running = block.status === "running";
-    const statusIcon = () =>
-      running
-        ? svg("mods/agent-chat/icons/refresh.svg").size(11).text_color(t.working).spin(900)
-        : div().size(5).rounded_full().bg(t.dim);
+    // Thinking is reasoning, not a reply: a bounded, scrollable panel, drawn
+    // dimmer than a reply. Its text is Markdown (models write `**headings**`),
+    // so it goes through the same renderer instead of showing raw asterisks.
+    // Every bounded panel is named: the feed is rebuilt on each poll and rows
+    // shift as turns arrive, so a panel identified only by its position would
+    // lose its scroll offset (or take another panel's) on the next repaint.
+    const thinkingBox = (text, id) =>
+      div()
+        .id(`${id}-scroll`)
+        .w_full()
+        .max_h(280)
+        .overflow_y_scrollbar()
+        .child(
+          div()
+            .w_full()
+            .mt(6)
+            .p(12)
+            .rounded(10)
+            .bg(t.raised)
+            .text_size(13)
+            .line_height("21px")
+            .text_color(t.dim)
+            .child(TextView.markdown(id, text).selectable(true))
+        );
 
     if (block.type === "thought") {
-      const label = running ? "Thinking…" : block.duration ? `Thought for ${block.duration}` : "Thought";
+      const isRunning = block.status === "running";
+      const line = block.liveLine;
+      const label = isRunning
+        ? (line ? `Thinking — ${line}` : "Thinking…")
+        : (line ? `Thought · ${line}` : (block.duration ? `Thought for ${block.duration}` : "Thought"));
+
       return column(
         v_flex()
           .w_full()
           .py(4)
           .child(
             h_flex()
+              .w_full()
+              .min_w(0)
               .items_center()
-              .gap(6)
+              .gap(8)
               .cursor_pointer()
-              .child(div().text_size(13).text_color(t.dim).child(label))
+              .child(
+                svg("mods/agent-chat/icons/brain.svg")
+                  .size(13)
+                  .flex_none()
+                  .text_color(isRunning ? t.working : t.dim)
+              )
+              .child(div().flex_1().min_w(0).truncate().text_size(13).text_color(t.dim).child(label))
               .child(chevron)
           )
           .when(open, (el) =>
             el.child(
-              div()
-                .mt(6)
-                .ml(2)
-                .pl(14)
-                .border_l(2)
-                .border_color(t.border)
-                .text_size(13)
-                .line_height("21px")
-                .text_color(t.dim)
-                .child(block.text || block.summary || "")
+              thinkingBox(block.text || block.summary || "", `think-${block.ekey}`)
             )
           )
           .when(copied, (el) => el.child(copiedNote()))
       );
     }
 
+    // Errors, interruptions, model switches: one quiet line in the turn.
+    if (block.type === "notice") {
+      const isError = block.tone === "error";
+      const errColor = t.ansi1 || "#ef4444";
+      return column(
+        h_flex()
+          .w_full()
+          .items_start()
+          .gap(8)
+          .py(6)
+          .child(
+            svg(isError ? "mods/agent-chat/icons/shield-alert.svg" : "mods/agent-chat/icons/corner-up-right.svg")
+              .size(13)
+              .text_color(isError ? errColor : t.dim)
+          )
+          .child(
+            div()
+              .flex_1()
+              .min_w(0)
+              .text_size(12.5)
+              .line_height("19px")
+              .text_color(isError ? errColor : t.dim)
+              .child(block.text || "")
+          )
+      );
+    }
+
     if (block.type === "tool") {
+      const action = block.action || "other";
+      const iconPath = toolActionIcon(action);
+      const isRunning = block.status === "running";
+      const isFailed = block.hasFailure || block.status === "error";
+      const errColor = t.ansi1 || "#ef4444";
+
       return column(
         v_flex()
           .w_full()
@@ -1308,8 +1506,14 @@ export default class AgentChat extends View {
               .items_center()
               .gap(8)
               .min_w(0)
-              .when(Boolean(block.detail), (el) => el.cursor_pointer())
-              .child(statusIcon())
+              .cursor_pointer()
+              .child(
+                isRunning
+                  ? svg("mods/agent-chat/icons/refresh.svg").size(12).text_color(t.working)
+                  : svg(iconPath)
+                      .size(13)
+                      .text_color(isFailed ? errColor : t.dim)
+              )
               .child(
                 div()
                   .flex_1()
@@ -1317,7 +1521,7 @@ export default class AgentChat extends View {
                   .truncate()
                   .text_size(12.5)
                   .font_family(monoFont)
-                  .text_color(t.dim)
+                  .text_color(isFailed ? errColor : t.dim)
                   .child(block.title || "Tool call")
               )
               .when(Boolean(block.detail), (el) => el.child(chevron))
@@ -1328,9 +1532,13 @@ export default class AgentChat extends View {
     }
 
     if (block.type === "tool_group") {
-      const preview =
-        block.tools.map((x) => x.title).slice(0, 2).join(" · ") +
-        (block.tools.length > 2 ? ` · +${block.tools.length - 2}` : "");
+      const summaryKind = block.summaryKind || "mixed";
+      const iconPath = toolActionIcon(summaryKind);
+      const isRunning = block.status === "running";
+      const errColor = t.ansi1 || "#ef4444";
+      const failedCount = (block.tools || []).filter((x) => x.hasFailure || x.status === "error").length;
+      const summaryText = block.summary || `Used ${block.count} tools`;
+
       return column(
         v_flex()
           .w_full()
@@ -1341,18 +1549,47 @@ export default class AgentChat extends View {
               .gap(8)
               .min_w(0)
               .cursor_pointer()
-              .child(statusIcon())
-              .child(div().flex_none().text_size(13).text_color(t.dim).child(`Used ${block.count} tools`))
-              .when(!open, (el) =>
+              .child(
+                isRunning
+                  ? svg("mods/agent-chat/icons/refresh.svg").size(12).text_color(t.working)
+                  : svg(iconPath).size(13).text_color(t.dim)
+              )
+              .child(div().flex_none().text_size(13).text_color(t.foreground).child(summaryText))
+              .when(failedCount > 0, (el) =>
                 el.child(
                   div()
-                    .flex_1()
-                    .min_w(0)
-                    .truncate()
-                    .text_size(12)
+                    .flex_none()
+                    .px(6)
+                    .py(1)
+                    .rounded(4)
+                    .border_1()
+                    .border_color(withAlpha(errColor, "66"))
+                    .text_size(10.5)
+                    .text_color(errColor)
+                    .child(`${failedCount} failed`)
+                )
+              )
+              // Always fills the row, so the count and chevron sit at the right edge.
+              .child(
+                div()
+                  .flex_1()
+                  .min_w(0)
+                  .truncate()
+                  .text_size(12)
+                  .text_color(t.dim)
+                  .child(block.activity ? `· ${block.activity}` : "")
+              )
+              .when(block.count > 0, (el) =>
+                el.child(
+                  div()
+                    .px(5)
+                    .py(1)
+                    .rounded(4)
+                    .bg(t.raised)
+                    .text_size(10.5)
                     .font_family(monoFont)
-                    .text_color(withAlpha(t.dim, "b0"))
-                    .child(preview)
+                    .text_color(t.dim)
+                    .child(String(block.count))
                 )
               )
               .child(chevron)
@@ -1361,37 +1598,129 @@ export default class AgentChat extends View {
             el.child(
               v_flex()
                 .w_full()
-                .mt(4)
-                .gap(2)
-                .children(
-                  block.tools.map((tool) =>
-                    v_flex()
+                .mt(6)
+                .pl(8)
+                .gap(4)
+                .border_l(2)
+                .border_color(withAlpha(t.border, "70"))
+                .children([
+                  ...(block.thoughts || [])
+                    .map((thought, thoughtIndex) => ({ thought, thoughtIndex }))
+                    .filter(({ thought }) => Boolean(thought.text))
+                    .map(({ thought, thoughtIndex }) => {
+                      // Like a tool call: one line, opens on its own.
+                      const thoughtKey = `${block.ekey}:thought${thoughtIndex}`;
+                      const thoughtOpen = this.expanded.has(thoughtKey);
+                      const line = liveThoughtLine(thought.text);
+                      const thinking = thought.status === "running";
+                      return v_flex()
+                        .w_full()
+                        .child(
+                          h_flex()
+                            .id(`thought-${thoughtKey}`)
+                            .items_center()
+                            .gap(8)
+                            .py(2)
+                            .cursor_pointer()
+                            .on_click((_e, cx) => {
+                              cx.stop_propagation();
+                              if (this.expanded.has(thoughtKey)) this.expanded.delete(thoughtKey);
+                              else this.expanded.add(thoughtKey);
+                              cx.notify();
+                            })
+                            .child(
+                              svg("mods/agent-chat/icons/brain.svg")
+                                .size(12)
+                                .text_color(thinking ? t.working : t.dim)
+                            )
+                            .child(
+                              div()
+                                .flex_1()
+                                .min_w(0)
+                                .truncate()
+                                .text_size(12)
+                                .text_color(t.dim)
+                                .child(
+                                  thinking
+                                    ? line ? `Thinking — ${line}` : "Thinking…"
+                                    : line ? `Thought · ${line}` : "Thought"
+                                )
+                            )
+                            .child(
+                              svg(
+                                thoughtOpen
+                                  ? "mods/agent-chat/icons/chevron-down.svg"
+                                  : "mods/agent-chat/icons/chevron-right.svg"
+                              )
+                                .size(11)
+                                .text_color(t.dim)
+                            )
+                        )
+                        .when(thoughtOpen, (el) =>
+                          el.child(thinkingBox(thought.text, `think-${thoughtKey}`))
+                        );
+                    }),
+                  ...block.tools.map((tool, toolIndex) => {
+                    // Each call opens on its own; output stays folded until asked for.
+                    const toolKey = `${block.ekey}:tool${toolIndex}`;
+                    const toolOpen = this.expanded.has(toolKey);
+                    return v_flex()
                       .w_full()
                       .child(
                         h_flex()
+                          .id(`tool-${toolKey}`)
                           .items_center()
                           .gap(8)
                           .py(2)
+                          .when(Boolean(tool.detail), (el) =>
+                            el.cursor_pointer().on_click((_e, cx) => {
+                              cx.stop_propagation();
+                              if (this.expanded.has(toolKey)) this.expanded.delete(toolKey);
+                              else this.expanded.add(toolKey);
+                              cx.notify();
+                            })
+                          )
                           .child(
-                            div()
-                              .size(5)
-                              .rounded_full()
-                              .bg(tool.status === "running" ? t.working : t.dim)
+                            tool.status === "running"
+                              ? svg("mods/agent-chat/icons/refresh.svg").size(11).text_color(t.working)
+                              : svg(toolActionIcon(tool.action || "other"))
+                                  .size(12)
+                                  .text_color(tool.status === "error" || tool.hasFailure ? errColor : t.dim)
                           )
                           .child(
                             div()
                               .flex_1()
                               .min_w(0)
                               .truncate()
-                              .text_size(12.5)
+                              .text_size(12)
                               .font_family(monoFont)
-                              .text_color(t.dim)
-                              .child(tool.title)
+                              .text_color(tool.status === "error" || tool.hasFailure ? errColor : t.dim)
+                              .child(tool.title || "Tool")
+                          )
+                          .when(Boolean(tool.detail), (el) =>
+                            el.child(
+                              svg(
+                                toolOpen
+                                  ? "mods/agent-chat/icons/chevron-down.svg"
+                                  : "mods/agent-chat/icons/chevron-right.svg"
+                              )
+                                .size(11)
+                                .text_color(t.dim)
+                            )
                           )
                       )
-                      .when(Boolean(tool.detail), (e) => e.child(detailBox(tool.detail)))
-                  )
-                )
+                      .when(toolOpen && Boolean(tool.detail), (e) =>
+                        e.child(
+                          div()
+                            .id(`tool-scroll-${toolKey}`)
+                            .w_full()
+                            .max_h(240)
+                            .overflow_y_scrollbar()
+                            .child(detailBox(tool.detail))
+                        )
+                      );
+                  }),
+                ])
             )
           )
           .when(copied, (el) => el.child(copiedNote()))
@@ -1399,6 +1728,51 @@ export default class AgentChat extends View {
     }
 
     return div();
+  }
+
+  /**
+   * A Markdown image in a reply. The native Markdown view draws none, and the
+   * host only loads images from the app's own folder, so the reference shows
+   * as an attachment row: what it is, and where it lives.
+   * @param {{alt: string, src: string}} img
+   * @param {any} t theme
+   * @param {string} monoFont
+   */
+  renderImageRef(img, t, monoFont) {
+    const name = basename(img.src.split("?")[0]) || img.src;
+    return h_flex()
+      .w_full()
+      .pt(10)
+      .pb(6)
+      .child(
+        h_flex()
+          .max_w_full()
+          .items_center()
+          .gap(8)
+          .px(10)
+          .py(6)
+          .rounded(8)
+          .bg(t.raised)
+          .border_1()
+          .border_color(t.border)
+          .child(svg("mods/agent-chat/icons/paperclip.svg").size(13).flex_none().text_color(t.dim))
+          .child(
+            div()
+              .flex_none()
+              .text_size(12.5)
+              .text_color(t.foreground)
+              .child(img.alt || name)
+          )
+          .child(
+            div()
+              .min_w(0)
+              .truncate()
+              .text_size(11)
+              .font_family(monoFont)
+              .text_color(t.dim)
+              .child(img.src)
+          )
+      );
   }
 
   /** Debug/preview rows: top and bottom breathing room around the turns. */
