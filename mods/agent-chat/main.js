@@ -48,23 +48,52 @@ const COLUMN = 760;
 const FEED_WINDOW = 20;
 const FEED_PAGE = 60;
 
+/**
+ * Claude Code's own `/model` picker, in its order. `/model <id>` switches the
+ * session (and saves it as the default); "default" follows the account's
+ * recommended model. Older models live behind its "More models" row, so the
+ * last entry here opens the native picker instead of guessing their ids.
+ */
 const CLAUDE_MODELS = [
-  { id: "claude-opus-5-5", label: "Opus 5.5", note: "Most capable for complex work" },
-  { id: "claude-sonnet-5-5", label: "Sonnet 5.5", note: "Fast and capable for everyday tasks" },
+  { id: "default", label: "Default", note: "Recommended model for your plan" },
+  { id: "claude-opus-5-5", label: "Opus 5.5", note: "For complex work and everyday tasks" },
+  { id: "claude-sonnet-5-5", label: "Sonnet 5.5", note: "Most efficient for simpler tasks" },
+  { id: "claude-fable-5-1", label: "Fable 5.1", note: "For your toughest challenges" },
   { id: "claude-haiku-5-5", label: "Haiku 5.5", note: "Fastest for quick answers" },
-  { id: "claude-fable-5-1", label: "Fable 5.1", note: "" },
 ];
 
-/** Effort levels Claude Code accepts with `/effort <level>`. */
-const EFFORTS = [
+/** Claude Code's `/effort` levels, the same five its picker steps through. */
+const CLAUDE_EFFORTS = [
   { id: "low", label: "Low", note: "Quickest, for simple tasks" },
   { id: "medium", label: "Medium", note: "Balanced speed and depth" },
   { id: "high", label: "High", note: "Thinks longer on hard problems" },
-  { id: "xhigh", label: "Extra high", note: "Deeper reasoning, slower" },
+  { id: "xhigh", label: "xHigh", note: "Deeper than high" },
   { id: "max", label: "Max", note: "Most thorough, slowest" },
 ];
 
+/** Models Antigravity CLI can switch to. */
+const ANTIGRAVITY_MODELS = [
+  { id: "gemini-3.8-flash-high", label: "Gemini 3.8 Flash (High)", note: "Fast with deep reasoning" },
+  { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash", note: "High speed for coding" },
+  { id: "gemini-3.8-pro", label: "Gemini 3.8 Pro", note: "Most complex reasoning" },
+  { id: "claude-3-7-sonnet", label: "Claude 3.7 Sonnet", note: "Hybrid reasoning" },
+];
+
+/** Effort levels agents accept with `/effort <level>`. */
+const EFFORTS = [
+  { id: "low", label: "Low", note: "Quickest, for simple tasks", bars: 1 },
+  { id: "medium", label: "Medium", note: "Balanced speed and depth", bars: 2 },
+  { id: "high", label: "High", note: "Thinks longer on hard problems", bars: 3 },
+  { id: "max", label: "Max", note: "Most thorough, slowest", bars: 3 },
+];
+
+/**
+ * Returns human-readable label for an effort ID.
+ * @param {string|null} id
+ * @returns {string|null}
+ */
 function effortLabel(id) {
+  if (id === "xhigh") return "xHigh";
   return EFFORTS.find((e) => e.id === id)?.label || (id ? id[0].toUpperCase() + id.slice(1) : null);
 }
 
@@ -84,6 +113,61 @@ function prettyModel(id) {
 }
 
 /**
+ * Renders rising effort bars: one per level, from low (1) to max (5).
+ * @param {string|null} effortId
+ * @param {any} t
+ * @param {boolean} [highlightMax=false]
+ * @returns {any}
+ */
+function renderEffortGlyph(effortId, t, highlightMax = false) {
+  const id = (effortId || "").toLowerCase();
+  const count = { minimal: 1, low: 1, medium: 2, high: 3, xhigh: 4, max: 5 }[id] || 0;
+
+  const heights = [3, 5, 7, 9, 11];
+  return h_flex()
+    .items_end()
+    .gap(2)
+    .h(12)
+    .children(
+      heights.map((h, i) =>
+        div()
+          .w(2)
+          .h(h)
+          .rounded(1)
+          .bg(
+            i < count
+              ? t.accent
+              : withAlpha(t.dim, "40")
+          )
+      )
+    );
+}
+
+
+/**
+ * Claude Code's model and effort as its screen shows them: the welcome banner
+ * ("Opus 5.5 with medium effort · Claude Pro") and the effort hint above the
+ * input ("◉ xhigh · /effort"), which is the more current of the two.
+ * @param {string} text
+ * @returns {{model: string|null, effort: string|null}|null}
+ */
+function claudeScreenModel(text) {
+  const lines = (text || "").split("\n");
+  let model = null;
+  let effort = null;
+  for (const line of lines) {
+    const banner = line.match(/[▐▛█▜▀▝▘\s]*(\S.*?)\s+with\s+(\w+)\s+effort\b/);
+    if (banner && !model) {
+      model = banner[1].trim();
+      effort = effort || banner[2].toLowerCase();
+    }
+    const hint = line.match(/(?:^|\s)\S\s+(minimal|low|medium|high|xhigh|max)\s+·\s+\/effort\s*$/);
+    if (hint) effort = hint[1];
+  }
+  return model || effort ? { model, effort } : null;
+}
+
+/**
  * The model an agent's own status line names, read from its screen:
  * OpenCode: "Build auto · DeepSeek V4.1 Flash OpenCode Go · max"
  * Antigravity: "? for shortcuts      Gemini 3.8 Flash · medium"
@@ -92,12 +176,50 @@ function screenModel(text) {
   const lines = (text || "").split("\n").slice(-20).reverse();
   for (const raw of lines) {
     const line = raw.replace(/[│┃▏▕█▌▐|]/g, " ").trim();
-    const mode = line.match(/(?:^|\s)(?:Build|Plan)\s+\S+\s+·\s+(.+?)(?:\s+·\s+(\S+))?$/);
+    // The mode may carry a word ("Build auto · …") or stand alone ("Build · …").
+    const mode = line.match(/(?:^|\s)(?:Build|Plan)(?:\s+[^\s·]+)?\s+·\s+(.+?)(?:\s+·\s+(\S+))?$/);
     if (mode) return { model: mode[1].trim(), effort: mode[2] || null };
     const tail = line.match(/\s{2,}(\S.*?)\s+·\s+(minimal|low|medium|high|xhigh|max)$/);
     if (tail) return { model: tail[1].trim(), effort: tail[2] };
   }
   return null;
+}
+
+/**
+ * Which agent a terminal runs, as its own report names it ("claude-code",
+ * "opencode", …). A freshly started agent has not reported yet (`app` is
+ * null until its first status), so the program it runs stands in for it;
+ * otherwise a new Claude session would be read off its welcome screen.
+ * @param {any} agent an `agents()` entry
+ * @returns {string|null}
+ */
+function agentApp(agent) {
+  if (agent?.app) return agent.app;
+  const key = agent?.program?.key;
+  return { claude: "claude-code", opencode: "opencode", antigravity: "antigravity", agy: "antigravity" }[key] || key || null;
+}
+
+/**
+ * The `agents()` entry for a terminal. A headless agent (started with
+ * `hc run`, a sub-agent with no pane of its own) is not in `agents()`, so its
+ * `terminals()` row stands in, shaped the same where the chat reads it.
+ * @param {string|null} address
+ * @returns {any|null}
+ */
+function findAgent(address) {
+  if (!address) return null;
+  const agent = agents().find((a) => a.address === address);
+  if (agent) return agent;
+  const term = terminals().find((t) => t.address === address);
+  // Only agents: a plain shell reports no status and is not an agent program.
+  if (!term || (!term.report?.app && !term.program?.agent && !term.status)) return null;
+  return {
+    address,
+    app: term.report?.app || term.agent || null,
+    program: term.program,
+    status: term.status || "idle",
+    title: term.name || term.program?.name || address,
+  };
 }
 
 function resolveTerminal() {
@@ -338,6 +460,7 @@ export default class AgentChat extends View {
     this.transcript = null;
     this.setBlocks(this.historyCache.get(address) || []);
     this.rawText = this.rawHistoryCache.get(address) || "";
+    this._screenAt = 0;
     this._signature = "";
     this._blockKeys = "";
     this._lastText = undefined;
@@ -403,7 +526,7 @@ export default class AgentChat extends View {
     try {
       if (!this.terminal) this.terminal = resolveTerminal();
       if (!this.terminal) return;
-      if (agents().find((a) => a.address === this.terminal)?.app === "opencode") this.refreshModels(cx);
+      if (agentApp(findAgent(this.terminal)) === "opencode") this.refreshModels(cx);
 
       // Claude Code: read its own transcript (real Markdown, tool results).
       if (await this.updateFromTranscript(cx, gen)) return;
@@ -412,7 +535,7 @@ export default class AgentChat extends View {
       if (gen !== this._generation) return;
       if (res.code !== 0 || !res.stdout) return;
       const data = JSON.parse(res.stdout);
-      const liveAgent = agents().find((a) => a.address === this.terminal);
+      const liveAgent = findAgent(this.terminal);
       const newStatus = data.why || liveAgent?.status || "idle";
       if (this._lastText === data.text && this.status === newStatus) return;
       if (gen !== this._generation) return;
@@ -457,8 +580,8 @@ export default class AgentChat extends View {
    *   the caller falls back to reading the screen.
    */
   async updateFromTranscript(cx, gen) {
-    const live = agents().find((a) => a.address === this.terminal);
-    const Reader = { "claude-code": ClaudeTranscript, opencode: OpenCodeTranscript }[live?.app];
+    const live = findAgent(this.terminal);
+    const Reader = { "claude-code": ClaudeTranscript, opencode: OpenCodeTranscript }[agentApp(live)];
     if (!Reader) return false;
     if (!(this.transcript instanceof Reader) || this.transcript.terminal !== this.terminal) {
       this.transcript = new Reader(this.terminal);
@@ -466,6 +589,24 @@ export default class AgentChat extends View {
     const result = await this.transcript.refresh((live?.status || "idle") === "working");
     if (gen !== undefined && gen !== this._generation) return true;
     if (!result) return false;
+
+    // Claude Code names its model only in replies; until the first one, the
+    // welcome banner on screen is the only place it shows. Read it slowly.
+    if (this.transcript instanceof ClaudeTranscript && !this.transcript.model) {
+      const now = Date.now();
+      if (!this._screenAt || now - this._screenAt > 3000) {
+        this._screenAt = now;
+        const res = await hc(["read", this.terminal, "--lines", "60", "--json"]);
+        if (gen !== undefined && gen !== this._generation) return true;
+        if (res.code === 0 && res.stdout) {
+          const text = JSON.parse(res.stdout)?.text || "";
+          if (text !== this.rawText) {
+            this.rawText = text;
+            cx.notify();
+          }
+        }
+      }
+    }
 
     const nextStatus = live?.status || "idle";
     const first = this._signature === "";
@@ -1456,18 +1597,25 @@ export default class AgentChat extends View {
 
   /** `{ model, effort }` display names; either may be null when it cannot be told. */
   currentModelInfo() {
-    const agent = agents().find((a) => a.address === this.terminal);
+    const agent = findAgent(this.terminal);
     if (this.transcript?.terminal === this.terminal) {
-      if (this.transcript instanceof ClaudeTranscript && agent?.app === "claude-code") {
-        return { model: claudeModelLabel(this.transcript.model), effort: effortLabel(this.transcript.effort) };
+      if (this.transcript instanceof ClaudeTranscript && agentApp(agent) === "claude-code") {
+        // Before the first reply there is no model on record: read the banner.
+        const seen = claudeScreenModel(this.rawText);
+        return {
+          model: claudeModelLabel(this.transcript.model) || seen?.model || null,
+          effort: effortLabel(this.transcript.effort || seen?.effort),
+        };
       }
-      if (this.transcript instanceof OpenCodeTranscript && agent?.app === "opencode") {
+      if (this.transcript instanceof OpenCodeTranscript && agentApp(agent) === "opencode") {
         const known = this.models.find(
           (m) =>
             m.modelID === this.transcript.model &&
             (!this.transcript.provider || m.providerID === this.transcript.provider)
         );
-        return { model: known?.name || this.transcript.modelLabel, effort: effortLabel(this.transcript.effort) };
+        const name = known?.name || this.transcript.modelLabel;
+        // A session with no messages yet has no model on record: read the TUI.
+        if (name) return { model: name, effort: effortLabel(this.transcript.effort) };
       }
     }
     const seen = screenModel(this.rawText);
@@ -1484,8 +1632,6 @@ export default class AgentChat extends View {
     this.modelMenuOpen = false;
     cx.notify();
     if (!this.terminal) return;
-    // A slash command only runs when it is alone in the agent's input. Pasted
-    // images already sit there, so the command would be sent as a message.
     if (this.attached > 0) {
       this.notice = "Send or clear the attached image before switching models.";
       cx.notify();
@@ -1506,14 +1652,10 @@ export default class AgentChat extends View {
     });
   }
 
-  /**
-   * Loads OpenCode's model catalogue and provider names. OpenCode exposes both
-   * through its own server, so the chat lists real models instead of telling
-   * the person to switch to the terminal.
-   */
+  /** Loads OpenCode's model catalogue and provider names. */
   refreshModels(cx, force = false) {
     if (this.modelsLoading) return;
-    if (!force && this.models.length > 0 && Date.now() - this.modelsAt < 60_000) return;
+    if (!force && this.modelsAt && Date.now() - this.modelsAt < 60_000) return;
     this.modelsLoading = true;
     cx.notify();
     const on = spaces().find((s) => s.active)?.machine ?? null;
@@ -1532,7 +1674,7 @@ export default class AgentChat extends View {
           this.providers = Object.fromEntries(data.map((p) => [p.id, p.name || p.id]));
         }
       } catch (_err) {
-        // Keep the last good catalogue; the native picker remains as fallback.
+        // Keep the last good catalogue
       } finally {
         this.modelsLoading = false;
         this.modelsAt = Date.now();
@@ -1541,8 +1683,28 @@ export default class AgentChat extends View {
     });
   }
 
-  /** Switches an OpenCode session to a catalogue model through its server API. */
-  switchOpenCodeModel(model, cx) {
+  /** The catalogue entry of the OpenCode session's current model, or null. */
+  currentOpenCodeModel() {
+    const tr = this.transcript;
+    if (!(tr instanceof OpenCodeTranscript) || tr.terminal !== this.terminal || !tr.model) return null;
+    return (
+      this.models.find((m) => m.modelID === tr.model && (!tr.provider || m.providerID === tr.provider)) || null
+    );
+  }
+
+  /**
+   * Switches an OpenCode session to a catalogue model through its server API.
+   * Effort is the model's `variant`: pass one to change it, or leave it out to
+   * keep the current effort when the new model offers it.
+   * @param {any} model catalogue entry
+   * @param {any} cx
+   * @param {string|null} [variant]
+   */
+  switchOpenCodeModel(model, cx, variant) {
+    if (variant === undefined) {
+      const current = this.transcript instanceof OpenCodeTranscript ? this.transcript.effort : null;
+      variant = current && (model.variants || []).some((v) => v.id === current) ? current : null;
+    }
     this.modelMenuOpen = false;
     cx.notify();
     const session =
@@ -1556,10 +1718,13 @@ export default class AgentChat extends View {
     const on = spaces().find((s) => s.active)?.machine ?? null;
     cx.spawn(async (cx) => {
       try {
-        const body = JSON.stringify({ model: { id: model.modelID, providerID: model.providerID } });
+        const ref = { id: model.modelID, providerID: model.providerID };
+        if (variant) ref.variant = variant;
+        const body = JSON.stringify({ model: ref });
         const r = await exec("opencode", ["api", "--data", body, "POST", `/api/session/${session}/model`], { on });
         if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `exit ${r.code}`);
-        this.notice = `${model.name || model.modelID} selected`;
+        const name = model.name || model.modelID;
+        this.notice = variant ? `${name} · ${effortLabel(variant)} selected` : `${name} selected`;
         cx.timer.after(2500, (cx) => {
           this.notice = null;
           cx.notify();
@@ -1572,29 +1737,30 @@ export default class AgentChat extends View {
     });
   }
 
+  /**
+   * Two-column Model & Reasoning Effort Popover.
+   */
   renderModelMenu(t, cx) {
-    const agent = agents().find((a) => a.address === this.terminal);
+    const agent = findAgent(this.terminal);
     const term = terminals().find((x) => x.address === this.terminal);
     const agentName = agent?.title || agent?.program?.name || term?.name || this.terminal || "No agent";
-    const isClaude = agent?.app === "claude-code";
-    const isOpenCode = agent?.app === "opencode";
-    const current =
-      this.transcript instanceof ClaudeTranscript && this.transcript.terminal === this.terminal ? this.transcript.model : null;
-    const currentModelId =
-      this.transcript instanceof OpenCodeTranscript && this.transcript.terminal === this.terminal ? this.transcript.model : null;
-    const currentProvider =
-      this.transcript instanceof OpenCodeTranscript && this.transcript.terminal === this.terminal
-        ? this.transcript.provider
-        : null;
+    const app = agentApp(agent);
+    const isClaude = app === "claude-code";
+    const isOpenCode = app === "opencode";
+    const isAntigravity = app === "antigravity" || app === "agy";
+
+    const currentModelInfo = this.currentModelInfo();
+    const currentModelName = currentModelInfo.model;
+    const currentEffort = currentModelInfo.effort;
 
     const row = (id, title, note, selected, onClick) =>
       h_flex()
         .id(id)
         .items_center()
         .gap(10)
-        .px(12)
-        .py(8)
-        .rounded(10)
+        .px(10)
+        .py(6)
+        .rounded(8)
         .cursor_pointer()
         .hover((s) => s.bg(t.hover))
         .on_click(onClick)
@@ -1602,19 +1768,34 @@ export default class AgentChat extends View {
           v_flex()
             .flex_1()
             .min_w(0)
-            .child(div().text_size(13).text_color(t.foreground).child(title))
-            .when(Boolean(note), (el) => el.child(div().text_size(11.5).text_color(t.dim).child(note)))
+            .child(
+              div()
+                .text_size(12.5)
+                .font_medium()
+                .text_color(selected ? t.accent : t.foreground)
+                .child(title)
+            )
+            .when(Boolean(note), (el) => el.child(div().text_size(11).text_color(t.dim).child(note)))
         )
-        .when(selected, (el) => el.child(svg("mods/agent-chat/icons/check.svg").size(14).text_color(t.foreground)));
+        .when(selected, (el) => el.child(svg("mods/agent-chat/icons/check.svg").size(13).text_color(t.accent)));
 
     /** @type {any[]} */
-    let models;
+    let modelRows = [];
     if (isClaude) {
-      models = CLAUDE_MODELS.map((m) =>
-        row(`model-${m.id}`, m.label, m.note, Boolean(current && current.startsWith(m.id)), (_e, cx) =>
-          this.chooseModel(`/model ${m.id}`, cx)
-        )
-      );
+      modelRows = [
+        ...CLAUDE_MODELS.map((m) =>
+          row(
+            `model-${m.id}`,
+            m.label,
+            m.note,
+            m.id !== "default" && Boolean(currentModelName && currentModelName.includes(m.label)),
+            (_e, cx) => this.chooseModel(`/model ${m.id}`, cx)
+          )
+        ),
+        row("model-open-native", "More models…", "Older models, in Claude Code's own picker", false, (_e, cx) =>
+          this.chooseModel("/model", cx)
+        ),
+      ];
     } else if (isOpenCode && this.models.length > 0) {
       const groups = new Map();
       for (const m of this.models) {
@@ -1622,86 +1803,185 @@ export default class AgentChat extends View {
         groups.get(m.providerID).push(m);
       }
       const providerName = (id) => this.providers[id] || id;
+      // The current model's provider leads, so the checked row is on screen
+      // when the menu opens; the rest follow alphabetically.
+      const currentProvider = this.currentOpenCodeModel()?.providerID;
       const order = [...groups.keys()].sort((a, b) => {
         if (a === currentProvider) return -1;
         if (b === currentProvider) return 1;
         return providerName(a).localeCompare(providerName(b));
       });
-      models = [];
       for (const provider of order) {
-        models.push(
-          div().px(12).pt(8).pb(4).text_size(11).text_color(t.dim).child(providerName(provider))
+        modelRows.push(
+          div().px(10).pt(6).pb(2).text_size(10.5).font_semibold().text_color(t.dim).child(providerName(provider))
         );
         const entries = groups
           .get(provider)
           .slice()
           .sort((a, b) => (a.name || a.modelID).localeCompare(b.name || b.modelID));
         for (const m of entries) {
-          models.push(
+          modelRows.push(
             row(
               `model-${provider}-${m.modelID}`,
               m.name || prettyModel(m.modelID) || m.modelID,
               "",
-              Boolean(currentModelId && m.modelID === currentModelId && (!currentProvider || m.providerID === currentProvider)),
+              Boolean(currentModelName && (currentModelName === m.name || currentModelName === m.modelID)),
               (_e, cx) => this.switchOpenCodeModel(m, cx)
             )
           );
         }
       }
-    } else if (isOpenCode) {
-      // The server catalogue is unavailable: offer a retry and the native list.
-      models = [
+    } else if (isAntigravity) {
+      modelRows = ANTIGRAVITY_MODELS.map((m) =>
         row(
-          "model-opencode-load",
-          this.currentModel() || "Choose a model",
-          this.modelsLoading ? "Loading OpenCode models…" : "Click to load OpenCode's model list",
-          false,
-          (_e, cx) => this.refreshModels(cx, true)
+          `model-${m.id}`,
+          m.label,
+          m.note,
+          Boolean(currentModelName && (currentModelName === m.label || currentModelName.includes(m.id))),
+          (_e, cx) => this.chooseModel(`/model ${m.id}`, cx)
+        )
+      );
+    } else {
+      modelRows = [
+        ...ANTIGRAVITY_MODELS.map((m) =>
+          row(
+            `model-${m.id}`,
+            m.label,
+            m.note,
+            Boolean(currentModelName && (currentModelName === m.label || currentModelName.includes(m.id))),
+            (_e, cx) => this.chooseModel(`/model ${m.id}`, cx)
+          )
         ),
-        row("model-open-native", "Open OpenCode's own model list", "Switch to Original to pick in the terminal", false, (_e, cx) =>
+        row("model-open-native", "Open native model selector", `Run /models in ${agentName}`, false, (_e, cx) =>
           this.chooseModel("/models", cx)
         ),
       ];
-    } else {
-      models = [
-        row(
-          "model-open-native",
-          this.currentModel() ? `${this.currentModel()}` : "Choose a model",
-          `Opens ${agentName}'s own model list in its terminal (switch to Original to pick)`,
-          false,
-          (_e, cx) => this.chooseModel(agent?.app === "opencode" ? "/models" : "/model", cx)
-        ),
-      ];
     }
+
+    // OpenCode has no `/effort` command (typing one just sends a message):
+    // effort is the model's `variant`, switched through the session API, and
+    // each model lists its own variants.
+    const ocModel = isOpenCode ? this.currentOpenCodeModel() : null;
+    const effortOptions = isOpenCode
+      ? ocModel?.variants?.length
+        ? [
+            { id: "default", label: "Default", note: "Model default" },
+            ...ocModel.variants.map((v) => ({ id: v.id, label: effortLabel(v.id), note: null })),
+          ]
+        : []
+      : isClaude
+      ? CLAUDE_EFFORTS
+      : EFFORTS;
+    const pickEffort = (id, cx) => {
+      if (isOpenCode) {
+        if (ocModel) this.switchOpenCodeModel(ocModel, cx, id === "default" ? null : id);
+      } else {
+        this.chooseModel(`/effort ${id}`, cx);
+      }
+    };
+    const effortRows = effortOptions.map((e) => {
+      const isSelected = currentEffort
+        ? currentEffort.toLowerCase() === e.id
+        : isOpenCode && e.id === "default";
+      return h_flex()
+        .id(`effort-${e.id}`)
+        .items_center()
+        .justify_between()
+        .px(8)
+        .py(6)
+        .rounded(8)
+        .cursor_pointer()
+        .hover((s) => s.bg(t.hover))
+        .on_click((_e, cx) => pickEffort(e.id, cx))
+        .child(
+          h_flex()
+            .items_center()
+            .gap(8)
+            .child(renderEffortGlyph(e.id, t, true))
+            .child(
+              v_flex()
+                .child(
+                  div()
+                    .text_size(12.5)
+                    .font_medium()
+                    .text_color(isSelected ? t.accent : t.foreground)
+                    .child(e.label)
+                )
+                .when(Boolean(e.note), (el) =>
+                  el.child(div().text_size(10.5).text_color(t.dim).child(e.note))
+                )
+            )
+        )
+        .when(isSelected, (el) =>
+          el.child(svg("mods/agent-chat/icons/check.svg").size(13).text_color(t.accent))
+        );
+    });
 
     return v_flex()
       .id("model-menu")
       .w_full()
       .max_h(420)
-      .overflow_y_scrollbar()
-      .p(6)
+      .rounded(16)
       .bg(t.raised)
-      .child(div().px(12).pt(6).pb(4).text_size(11.5).text_color(t.dim).child("Model"))
-      .children(models)
-      .when(isClaude, (el) =>
-        el
-          .child(div().mx(12).my(4).h(1).bg(t.border))
-          .child(div().px(12).pt(6).pb(4).text_size(11.5).text_color(t.dim).child("Effort"))
-          .children(
-            EFFORTS.map((e) =>
-              row(`effort-${e.id}`, e.label, e.note, current !== null && this.transcript.effort === e.id, (_e, cx) =>
-                this.chooseModel(`/effort ${e.id}`, cx)
-              )
-            )
-          )
-      )
-      .child(div().mx(12).my(4).h(1).bg(t.border))
+      .border_1()
+      .border_color(t.border)
+      .overflow_hidden()
       .child(
-        row("model-menu-agent", `Agent: ${agentName}`, "Switch to another agent or terminal", false, (_e, cx) => {
-          this.modelMenuOpen = false;
-          this.pickerOpen = true;
-          cx.notify();
-        })
+        h_flex()
+          .w_full()
+          .h(340)
+          // Left Column: Models
+          .child(
+            v_flex()
+              .id("model-menu-models")
+              .flex_1()
+              .min_w(0)
+              .h_full()
+              .p(8)
+              .border_r(1)
+              .border_color(t.border)
+              .overflow_y_scrollbar()
+              .child(
+                div()
+                  .px(8)
+                  .pt(4)
+                  .pb(6)
+                  .text_size(10.5)
+                  .font_semibold()
+                  .text_color(t.dim)
+                  .child("MODELS")
+              )
+              .children(modelRows)
+          )
+          // Right Column: Reasoning Effort
+          .child(
+            v_flex()
+              .id("model-menu-efforts")
+              .w(180)
+              .h_full()
+              .p(8)
+              .overflow_y_scrollbar()
+              .child(
+                div()
+                  .px(8)
+                  .pt(4)
+                  .pb(6)
+                  .text_size(10.5)
+                  .font_semibold()
+                  .text_color(t.dim)
+                  .child("REASONING EFFORT")
+              )
+              .children(effortRows)
+              .when(effortRows.length === 0, (el) =>
+                el.child(
+                  div()
+                    .px(8)
+                    .text_size(11)
+                    .text_color(t.dim)
+                    .child(ocModel ? "This model has no effort levels." : "Loading model details…")
+                )
+              )
+          )
       );
   }
 
