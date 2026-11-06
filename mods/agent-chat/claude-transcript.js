@@ -8,9 +8,9 @@
 // since (`tail -n +N`), so a poll costs one small process even for long sessions.
 import { hc, exec, home } from "herdr";
 import * as fs from "fs/promises";
-import { textOf, clip, toolTitle, itemsToBlocks } from "./transcript-blocks.js";
+import { textOf, clip, toolTitle, classifyTool, itemsToBlocks, settingChange } from "./transcript-blocks.js";
 
-export { textOf, clip, toolTitle, itemsToBlocks } from "./transcript-blocks.js";
+export { textOf, clip, toolTitle, classifyTool, itemsToBlocks } from "./transcript-blocks.js";
 
 /** Wrapper tags Claude Code puts around non-conversation user entries. */
 const HIDDEN_USER = /^\s*<(system-reminder|local-command-stdout|local-command-stderr|local-command-caveat|task-notification|bash-input|bash-stdout|bash-stderr)\b/;
@@ -22,6 +22,8 @@ const HIDDEN_USER = /^\s*<(system-reminder|local-command-stdout|local-command-st
  */
 function userText(raw) {
   if (typeof raw !== "string") return null;
+  // Model and effort switches show as a notice from their output instead.
+  if (/<command-name>\/?(model|effort)<\/command-name>/.test(raw)) return null;
   if (HIDDEN_USER.test(raw)) return null;
   if (raw.startsWith("Caveat:")) return null;
   if (raw.startsWith("[Request interrupted")) return null;
@@ -44,6 +46,11 @@ export class ClaudeTranscript {
     this.tools = new Map();
     this.lastMessageId = null;
     this.miss = null;
+    this.pid = null;
+    this.pidAt = 0;
+    this.size = 0;
+    this._blocks = null;
+    this._working = null;
   }
 
   /**
@@ -52,15 +59,24 @@ export class ClaudeTranscript {
    * @returns {Promise<string|null>}
    */
   async locate() {
-    const res = await hc(["get", this.terminal, "--json"]);
-    if (res.code !== 0) return null;
-    const pid = JSON.parse(res.stdout)?.foreground?.pid;
+    const now = Date.now();
+    // The foreground pid rarely changes; `hc get` is a process, so check it
+    // on a slow cadence and read the small session file every poll.
+    if (!this.pid || now - this.pidAt > 3000) {
+      const res = await hc(["get", this.terminal, "--json"]);
+      if (res.code !== 0) return null;
+      this.pid = JSON.parse(res.stdout)?.foreground?.pid || null;
+      this.pidAt = now;
+    }
+    const pid = this.pid;
     if (!pid) return null;
     const h = home();
     let session;
     try {
       session = JSON.parse(await fs.readFile(`${h}/.claude/sessions/${pid}.json`, "utf8"));
     } catch (_e) {
+      // The pid may have been replaced since the last `hc get`: retry it next poll.
+      this.pidAt = 0;
       return null;
     }
     if (!session?.sessionId) return null;
@@ -94,6 +110,15 @@ export class ClaudeTranscript {
     return null;
   }
 
+  /**
+   * True when the terminal runs Claude Code but its transcript file does not
+   * exist yet: a fresh session writes it with the first message, and until
+   * then the screen is only the welcome banner and the input placeholder.
+   */
+  get fresh() {
+    return Boolean(this.sessionId && !this.path);
+  }
+
   /** Resets cached state for a new session or after session changes. */
   reset() {
     this.path = null;
@@ -102,6 +127,11 @@ export class ClaudeTranscript {
     this.tools = new Map();
     this.lastMessageId = null;
     this.miss = null;
+    this.size = 0;
+    this._blocks = null;
+    this._working = null;
+    this.model = null;
+    this.effort = null;
   }
 
   /**
@@ -112,15 +142,28 @@ export class ClaudeTranscript {
   async refresh(agentWorking) {
     const sessionBefore = this.sessionId;
     const path = await this.locate();
-    if (!path) return null;
+    if (!path) {
+      if (!this.fresh) return null;
+      const changed = this._blocks === null || this._blocks.length > 0 || sessionBefore !== this.sessionId;
+      this._blocks = [];
+      return { blocks: this._blocks, changed };
+    }
+    let stat = null;
+    try {
+      stat = await fs.stat(path);
+    } catch (_e) {}
     let chunk;
     if (this.lines === 0) {
       chunk = await fs.readFile(path, "utf8");
+    } else if (stat && stat.size === this.size) {
+      // Nothing was appended; skip the `tail` process entirely.
+      chunk = "";
     } else {
       const res = await exec("tail", ["-n", `+${this.lines + 1}`, path]);
       if (res.code !== 0) return null;
       chunk = res.stdout;
     }
+    if (stat) this.size = stat.size;
     // Only whole lines: a line still being written is read on the next poll.
     const end = chunk.lastIndexOf("\n");
     const complete = end >= 0 ? chunk.slice(0, end) : "";
@@ -136,7 +179,8 @@ export class ClaudeTranscript {
     }
     const changed = lines.length > 0 || sessionBefore !== this.sessionId || agentWorking !== this._working;
     this._working = agentWorking;
-    return { blocks: this.blocks(agentWorking), changed };
+    if (changed || !this._blocks) this._blocks = this.blocks(agentWorking);
+    return { blocks: this._blocks, changed };
   }
 
   ingest(entry) {
@@ -156,6 +200,18 @@ export class ClaudeTranscript {
 
     if (entry.type === "user") {
       if (entry.isMeta || entry.isCompactSummary) return;
+      const change = settingChange(typeof content === "string" ? content : textOf(content));
+      if (change) {
+        if (change.model) {
+          this.model = change.model;
+          this.items.push({ type: "notice", tone: "info", text: `Model set to ${change.model}` });
+        }
+        if (change.effort) {
+          this.effort = change.effort;
+          this.items.push({ type: "notice", tone: "info", text: `Effort set to ${change.effort}` });
+        }
+        return;
+      }
       if (typeof content === "string") {
         const text = userText(content);
         if (text) this.items.push({ type: "user", text });
@@ -170,6 +226,7 @@ export class ClaudeTranscript {
           if (tool) {
             tool.detail = clip(textOf(part.content));
             tool.status = part.is_error ? "error" : "done";
+            tool.hasFailure = Boolean(part.is_error);
           }
         } else if (part?.type === "text") {
           const t = userText(part.text);
@@ -198,7 +255,18 @@ export class ClaudeTranscript {
           // Redacted thinking arrives empty; only readable thinking gets a row.
           this.items.push({ type: "thought", text: part.thinking, status: "done" });
         } else if (part?.type === "tool_use") {
-          const tool = { type: "tool", title: toolTitle(part.name, part.input), detail: "", status: "running" };
+          const classified = classifyTool(part.name, part.input);
+          const tool = {
+            type: "tool",
+            name: part.name,
+            input: part.input,
+            action: classified.action,
+            changedFiles: classified.changedFiles,
+            title: toolTitle(part.name, part.input),
+            detail: "",
+            status: "running",
+            hasFailure: false,
+          };
           this.tools.set(part.id, tool);
           this.items.push(tool);
         }
