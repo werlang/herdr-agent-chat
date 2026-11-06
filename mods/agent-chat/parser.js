@@ -1,4 +1,17 @@
 // Parser for terminal conversation streams into structured chat turns.
+import {
+  classifyTool,
+  summarizeToolGroup,
+  toolGroupSummaryKind,
+  liveThoughtLine,
+} from "./transcript-blocks.js";
+
+export {
+  classifyTool,
+  summarizeToolGroup,
+  toolGroupSummaryKind,
+  liveThoughtLine,
+};
 
 export function stripAnsi(str) {
   return (str ?? "")
@@ -21,7 +34,7 @@ function stripStartupBanners(lines) {
   for (let i = 0; i < Math.min(lines.length, 30); i++) {
     const line = lines[i].trim();
     if (
-      /[▄▀█▌▐]/.test(line) ||
+      /[▄▀█▌▐▛▜▙▟▝▘▗▖]/.test(line) ||
       /Antigravity CLI/i.test(line) ||
       /Welcome to Claude Code/i.test(line) ||
       /^[╭╰│]/.test(line)
@@ -65,9 +78,19 @@ function stripBottomChrome(lines) {
       endIndex--;
       continue;
     }
+    // Claude Code's input placeholder ("❯ Try \"fix typecheck errors\""),
+    // mode footer ("⏵⏵ auto mode on…") and effort hint ("◐ medium · /effort").
+    if (
+      /^(?:>|❯)\s+Try\s+".*"$/.test(line) ||
+      /^[⏵⏸]{1,2}\s/.test(line) ||
+      /·\s+\/effort$/.test(line)
+    ) {
+      endIndex--;
+      continue;
+    }
     if (
       /^(?:esc to cancel|ctrl\+c to cancel|\? for shortcuts|\[hc\]|└\s*Tip:)/i.test(line) ||
-      /(?:esc to cancel|\? for shortcuts)/i.test(line) ||
+      /(?:esc to cancel|\? for shortcuts|\/artifact to review)/i.test(line) ||
       /^(?:Gemini|Claude|OpenCode|Codex)\s+[\w\.\s\·]+$/i.test(line) ||
       /●\s+\[[\d:]+\]\s+hc\s+wait/i.test(line)
     ) {
@@ -80,6 +103,11 @@ function stripBottomChrome(lines) {
   return lines.slice(0, endIndex);
 }
 
+/**
+ * Parses raw terminal text into structured chat blocks (user, thought, tool, assistant).
+ * @param {string} rawText
+ * @returns {Array<object>}
+ */
 export function parseConversation(rawText) {
   const clean = stripAnsi(rawText);
   let rawLines = clean.split("\n");
@@ -111,10 +139,14 @@ export function parseConversation(rawText) {
     } else if (currentBlock.type === "tool") {
       const title = currentBlock.title || "";
       const detail = currentBlock.lines.join("\n").trim();
+      const classified = classifyTool("", {}, title);
       rawBlocks.push({
         type: "tool",
         title,
         detail,
+        action: classified.action,
+        changedFiles: classified.changedFiles,
+        hasFailure: currentBlock.status === "error",
         status: currentBlock.status || "done",
       });
     } else if (currentBlock.type === "assistant") {
@@ -225,8 +257,14 @@ export function parseConversation(rawText) {
       continue;
     }
 
-    // Tool detail lines
+    // Tool detail or wrapped title lines
     if (currentBlock && currentBlock.type === "tool") {
+      const openParens = (currentBlock.title.match(/\(/g) || []).length;
+      const closeParens = (currentBlock.title.match(/\)/g) || []).length;
+      if (openParens > closeParens && trimmed && !/^[>❯●○▸✻∴─━]/.test(trimmed)) {
+        currentBlock.title = `${currentBlock.title} ${trimmed}`.replace(/\(ctrl\+o to expand\)/i, "").trim();
+        continue;
+      }
       if (/^\s*(?:[⎿└]|\s{2,})/.test(line)) {
         currentBlock.lines.push(trimmed);
         continue;
@@ -242,11 +280,12 @@ export function parseConversation(rawText) {
     }
 
     // Assistant response lines
+    const normalizedLine = line.replace(/^(\s*)[•◦]\s+/, "$1- ");
     if (!currentBlock || currentBlock.type !== "assistant") {
       pushCurrent();
-      currentBlock = { type: "assistant", lines: [line] };
+      currentBlock = { type: "assistant", lines: [normalizedLine] };
     } else {
-      currentBlock.lines.push(line);
+      currentBlock.lines.push(normalizedLine);
     }
   }
 
@@ -263,9 +302,37 @@ export function parseConversation(rawText) {
     }
   }
 
-  // Group consecutive tool blocks into tool groups
+  // Group consecutive tool blocks into tool groups and attach changedFiles to assistant
   const finalBlocks = [];
   let currentToolGroup = null;
+  let lastChangedFiles = [];
+
+  const flushGroup = () => {
+    if (!currentToolGroup) return;
+    if (currentToolGroup.length === 1) {
+      const single = currentToolGroup[0];
+      if (single.changedFiles?.length > 0) {
+        lastChangedFiles.push(...single.changedFiles);
+      }
+      finalBlocks.push(single);
+    } else {
+      const summaryInfo = summarizeToolGroup(currentToolGroup);
+      if (summaryInfo.changedFiles?.length > 0) {
+        lastChangedFiles.push(...summaryInfo.changedFiles);
+      }
+      finalBlocks.push({
+        type: "tool_group",
+        tools: currentToolGroup,
+        summary: summaryInfo.summary,
+        summaryKind: summaryInfo.summaryKind,
+        hasFailure: summaryInfo.hasFailure,
+        changedFiles: summaryInfo.changedFiles,
+        status: currentToolGroup.some((t) => t.status === "running") ? "running" : "done",
+        count: currentToolGroup.length,
+      });
+    }
+    currentToolGroup = null;
+  };
 
   for (const block of consolidated) {
     if (block.type === "tool") {
@@ -275,35 +342,19 @@ export function parseConversation(rawText) {
         currentToolGroup.push(block);
       }
     } else {
-      if (currentToolGroup) {
-        if (currentToolGroup.length === 1) {
-          finalBlocks.push(currentToolGroup[0]);
-        } else {
-          finalBlocks.push({
-            type: "tool_group",
-            tools: currentToolGroup,
-            status: currentToolGroup.some((t) => t.status === "running") ? "running" : "done",
-            count: currentToolGroup.length,
-          });
-        }
-        currentToolGroup = null;
+      flushGroup();
+      const b = { ...block };
+      if (b.type === "assistant" && lastChangedFiles.length > 0) {
+        b.changedFiles = [...new Set(lastChangedFiles)];
+        lastChangedFiles = [];
+      } else if (b.type === "user") {
+        lastChangedFiles = [];
       }
-      finalBlocks.push(block);
+      finalBlocks.push(b);
     }
   }
 
-  if (currentToolGroup) {
-    if (currentToolGroup.length === 1) {
-      finalBlocks.push(currentToolGroup[0]);
-    } else {
-      finalBlocks.push({
-        type: "tool_group",
-        tools: currentToolGroup,
-        status: currentToolGroup.some((t) => t.status === "running") ? "running" : "done",
-        count: currentToolGroup.length,
-      });
-    }
-  }
+  flushGroup();
 
   return finalBlocks;
 }
@@ -317,7 +368,8 @@ export function parseConversation(rawText) {
  */
 export function spliceHistory(cached, parsed) {
   if (!cached || cached.length === 0) return parsed;
-  const firstUser = parsed.find((b) => b.type === "user");
+  const firstUserIdx = parsed.findIndex((b) => b.type === "user");
+  const firstUser = firstUserIdx >= 0 ? parsed[firstUserIdx] : null;
   let at = -1;
   if (firstUser) {
     for (let i = cached.length - 1; i >= 0; i--) {
@@ -333,6 +385,8 @@ export function spliceHistory(cached, parsed) {
       }
     }
   }
-  return (at >= 0 ? cached.slice(0, at) : cached).concat(parsed);
+  if (at >= 0) {
+    return cached.slice(0, at).concat(parsed.slice(firstUserIdx));
+  }
+  return cached.concat(parsed);
 }
-

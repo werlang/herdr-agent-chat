@@ -105,3 +105,20 @@ assert.strictEqual(thoughtBlocks[1].text, "Checking for required files (e.g. foo
 
 console.log("All parser unit tests passed successfully!");
 
+
+// Claude Code's welcome screen (no transcript yet) is all chrome: the logo,
+// the input placeholder, the effort hint and the mode footer.
+const claudeWelcome = ` ▐▛███▛█   Claude Code v2.1.319
+▝▜██████▀  Opus 5.5 with medium effort · Claude Pro
+ ▝▝   ▝▝   ~/Documents/Workspaces/herdr/herdr-agent-chat
+
+
+                                                       ◐ medium · /effort
+────────────────────────────────────────
+❯ Try "fix typecheck errors"
+────────────────────────────────────────
+
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents
+`;
+assert.deepStrictEqual(parseConversation(claudeWelcome), []);
+console.log("Claude welcome screen parses to no turns.");
