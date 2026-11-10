@@ -1,8 +1,8 @@
 {
   "name": "agent-chat",
-  "version": "0.1.0",
-  "title": "Agent Chat UI",
-  "description": "Native chat UI for CLI coding agents in Herdr",
+  "version": "0.1.1",
+  "title": "Agent Chat",
+  "description": "Native chat UI for CLI coding agents, beside or instead of their terminal",
   "place": "none",
   "focusable": true
 }
