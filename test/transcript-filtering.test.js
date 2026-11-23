@@ -20,10 +20,15 @@ const {
   terminalMachine,
   terminalLocalAddress,
   extractChangedFiles,
+  estimateBlockHeight,
+  computeFeedLayout,
   parseMarkdownBlocks,
   resolveInternalFileLink,
+  prependEarlierBlocks,
+  preserveScrollOnResize,
+  applyPrependAnchor,
 } = await import("../mods/agent-chat/transcript-blocks.js");
-const { buildOpenCodePollQuery, messageItems } = await import("../mods/agent-chat/opencode-data.js");
+const { buildOpenCodePollQuery, buildOpenCodeEarlierQuery, messageItems } = await import("../mods/agent-chat/opencode-data.js");
 const { parseConversation } = await import("../mods/agent-chat/parser.js");
 const { claudeUserText, ClaudeTranscript } = await import("../mods/agent-chat/claude-transcript.js");
 const { ingestCodexEntry } = await import("../mods/agent-chat/codex-transcript.js");
@@ -196,6 +201,28 @@ test("parseConversation keeps Claude ● prose as assistant and Codex › as use
   assert.equal(blocks[1].text, "Here is the explanation in prose.");
   assert.equal(blocks[2].title, "Read(main.js)");
 });
+
+test("computeFeedLayout computes top-to-bottom offsets, maxScroll, and preserves anchor on earlier batch", () => {
+  const blocks = Array.from({ length: 20 }, (_, i) => ({
+    type: i % 2 === 0 ? "user" : "assistant",
+    ekey: `${i % 2 === 0 ? "user" : "assistant"}#${i}`,
+    text: `Message ${i}\nLine 2\nLine 3`,
+  }));
+  const tail = computeFeedLayout(blocks.slice(10), null, 400, true, 760);
+  assert.ok(tail.maxScroll > 0);
+  assert.equal(tail.rowOffsets.length, 10);
+
+  const expanded = computeFeedLayout(blocks, null, 400, false, 760);
+  assert.ok(expanded.maxScroll > tail.maxScroll);
+  assert.ok(estimateBlockHeight({ type: "notice", tone: "warning", text: "Rate limit warning" }) >= 44);
+});
+
+test("OpenCode query isolates new sessions via minCreatedMs when title and sessionId are absent", () => {
+  const sql = buildOpenCodePollQuery({ cwd: "/repo", minCreatedMs: 1795450000000 });
+  assert.match(sql, /time_created >= 1795450000000/);
+  assert.match(sql, /directory = '\/repo'/);
+});
+
 test("parseMarkdownBlocks parses headings, nested bullet lists, ordered lists, and code blocks", () => {
   const md = [
     "### 1. Section",
@@ -217,6 +244,13 @@ test("parseMarkdownBlocks parses headings, nested bullet lists, ordered lists, a
   assert.equal(blocks[1].items[0].blocks[1].items.length, 2);
   assert.equal(blocks[2].ordered, true);
   assert.equal(blocks[3].lang, "js");
+});
+
+test("AntigravityTranscript locates transcript_full.jsonl before transcript.jsonl", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const src = await readFile(new URL("../mods/agent-chat/antigravity-transcript.js", import.meta.url), "utf8");
+  assert.match(src, /transcript_full\.jsonl/);
+  assert.ok(src.indexOf("transcript_full.jsonl") < src.indexOf("'transcript.jsonl'"));
 });
 
 test("resolveInternalFileLink resolves file:// URLs, absolute paths, and relative paths for file-editor", () => {
@@ -255,4 +289,57 @@ test("resolveInternalFileLink resolves file:// URLs, absolute paths, and relativ
       line: null,
     }
   );
+});
+
+test("prependEarlierBlocks deduplicates overlap and prepends only earlier CLI blocks", () => {
+  const older = [
+    { type: "user", text: "turn 1" },
+    { type: "assistant", text: "reply 1" },
+    { type: "user", text: "turn 2" },
+  ];
+  const current = [
+    { type: "user", text: "turn 2" },
+    { type: "assistant", text: "reply 2" },
+  ];
+  const res = prependEarlierBlocks(older, current);
+  assert.equal(res.addedCount, 2);
+  assert.deepEqual(res.merged.map((b) => b.text), ["turn 1", "reply 1", "turn 2", "reply 2"]);
+
+  const noNew = prependEarlierBlocks(current, current);
+  assert.equal(noNew.addedCount, 0);
+});
+
+test("buildOpenCodePollQuery supports tail limit and buildOpenCodeEarlierQuery pages older seq", () => {
+  const limited = buildOpenCodePollQuery({ sessionId: "ses_1", since: 0, limit: 20 });
+  assert.match(limited, /order by seq desc limit 20\)/);
+  assert.equal((limited.match(/session_v2/g) || []).length, 1);
+  assert.equal((limited.match(/session_message/g) || []).length, 1);
+
+  const unlimited = buildOpenCodePollQuery({ sessionId: "ses_1", since: 100 });
+  assert.doesNotMatch(unlimited, /order by seq desc limit/);
+
+  const earlier = buildOpenCodeEarlierQuery({ sessionId: "ses_1", beforeSeq: 45, limit: 20 });
+  assert.match(earlier, /session_id = 'ses_1' and seq < 45/);
+  assert.match(earlier, /order by seq desc limit 20$/);
+});
+
+test("preserveScrollOnResize keeps scrollY constant when viewport height changes", () => {
+  const scrollFromBottom = 240;
+  const prevMax = 1000;
+  const nextMax = 1044; // working bar appeared, shrinking viewport by 44px
+  const nextFromBottom = preserveScrollOnResize(scrollFromBottom, prevMax, nextMax);
+  const prevScrollY = prevMax - scrollFromBottom;
+  const nextScrollY = nextMax - nextFromBottom;
+  assert.equal(nextScrollY, prevScrollY);
+  assert.equal(nextFromBottom, 284);
+});
+
+test("applyPrependAnchor shifts scrollY by exact real height delta so visible rows stay pixel-locked", () => {
+  const prevScrollY = 40;
+  const prevHeight = 2100;
+  const newHeight = 3450; // +1350px prepended above viewport
+  const nextScrollY = applyPrependAnchor(prevScrollY, prevHeight, newHeight);
+  assert.equal(nextScrollY, 1390);
+  // Item originally at y = 440px (screen y = 440 - 40 = 400px) is now at y = 1790px:
+  assert.equal(440 + (newHeight - prevHeight) - nextScrollY, 400);
 });

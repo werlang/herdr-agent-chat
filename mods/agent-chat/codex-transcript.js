@@ -1,5 +1,5 @@
 // Reads a Codex CLI session from its JSONL rollout transcript under ~/.codex/sessions.
-import { exec, home, readTextFile, terminals } from "herdr";
+import { hc, exec, home, readTextFile, terminals } from "herdr";
 import * as fs from "fs/promises";
 import {
   textOf,
@@ -10,6 +10,12 @@ import {
   terminalMachine,
   stripHarnessXml,
 } from "./transcript-blocks.js";
+import {
+  INITIAL_TAIL_LINES,
+  EARLIER_BATCH_LINES,
+  readJsonlTail,
+  readJsonlRange,
+} from "./jsonl-tail.js";
 
 const CODEX_HARNESS_BLOCK = /^\s*<(environment_context|permissions instructions|INSTRUCTIONS|app-context|user_instructions)\b/i;
 
@@ -190,12 +196,32 @@ export function ingestCodexEntry(state, entry) {
 }
 
 const PY_LOCATE_CODEX = [
-  "import json, glob, os, sys",
+  "import json, glob, os, sqlite3, sys",
   "cwd = sys.argv[1]",
-  "root = os.path.expanduser('~/.codex/sessions')",
-  "files = sorted(glob.glob(f'{root}/**/rollout-*.jsonl', recursive=True), key=os.path.getmtime, reverse=True)",
+  "pid = sys.argv[2] if len(sys.argv) > 2 else ''",
+  "created_ms = int(float(sys.argv[3])) if len(sys.argv) > 3 and sys.argv[3] else 0",
+  "root = os.path.expanduser('~/.codex')",
+  "if pid:",
+  "    try:",
+  "        logs_db = os.path.join(root, 'logs_2.sqlite')",
+  "        state_db = os.path.join(root, 'state_5.sqlite')",
+  "        if os.path.isfile(logs_db) and os.path.isfile(state_db):",
+  "            con = sqlite3.connect(f'file:{logs_db}?mode=ro', uri=True)",
+  "            row = con.execute('SELECT thread_id FROM logs WHERE process_uuid LIKE ? AND thread_id IS NOT NULL ORDER BY ts DESC LIMIT 1', (f'pid:{pid}:%',)).fetchone()",
+  "            con.close()",
+  "            if row and row[0]:",
+  "                con2 = sqlite3.connect(f'file:{state_db}?mode=ro', uri=True)",
+  "                r2 = con2.execute('SELECT rollout_path FROM threads WHERE id = ? AND attached_thread_parent_id IS NULL', (row[0],)).fetchone()",
+  "                con2.close()",
+  "                if r2 and r2[0] and os.path.isfile(r2[0]):",
+  "                    print(r2[0]); sys.exit(0)",
+  "    except Exception: pass",
+  "sessions_dir = os.path.join(root, 'sessions')",
+  "files = sorted(glob.glob(f'{sessions_dir}/**/rollout-*.jsonl', recursive=True), key=os.path.getmtime, reverse=True)",
   "for f in files[:25]:",
   "    try:",
+  "        if created_ms > 0 and os.path.getmtime(f) * 1000 < created_ms - 5000:",
+  "            continue",
   "        with open(f, 'r', encoding='utf-8') as fh:",
   "            line = fh.readline()",
   "        meta = json.loads(line).get('payload', {})",
@@ -218,7 +244,12 @@ export class CodexTranscript {
     this.model = null;
     this.effort = null;
     this.miss = 0;
+    this.pid = null;
+    this.pidAt = 0;
     this.size = 0;
+    this.startLine = 1;
+    this.hasEarlier = false;
+    this.rawLines = [];
     this._blocks = null;
     this._working = null;
   }
@@ -226,6 +257,9 @@ export class CodexTranscript {
   reset() {
     this.path = null;
     this.lines = 0;
+    this.startLine = 1;
+    this.hasEarlier = false;
+    this.rawLines = [];
     this.items = [];
     this.tools = new Map();
     this.model = null;
@@ -238,10 +272,11 @@ export class CodexTranscript {
   async locate() {
     if (this.path) return this.path;
     const now = Date.now();
-    if (now - this.miss < 5000) return null;
+    if (now - this.miss < 3000) return null;
 
     const term = terminals().find((t) => t.address === this.terminal);
     const cwd = term?.cwd || "";
+    const createdMs = term?.created_ms || 0;
     const recPath = (Array.isArray(term?.records) ? term.records : [])
       .find((r) => typeof r === "string" && /rollout-.*\.jsonl$/.test(r));
     if (recPath) {
@@ -249,7 +284,21 @@ export class CodexTranscript {
       return this.path;
     }
 
-    const res = await exec("python3", ["-c", PY_LOCATE_CODEX, cwd], this.machine ? { on: this.machine } : undefined);
+    if (!this.pid || now - this.pidAt > 3000) {
+      try {
+        const g = await hc(["get", this.terminal, "--json"]);
+        if (g.code === 0 && g.stdout) {
+          this.pid = JSON.parse(g.stdout)?.foreground?.pid || null;
+          this.pidAt = now;
+        }
+      } catch (_e) {}
+    }
+
+    const res = await exec(
+      "python3",
+      ["-c", PY_LOCATE_CODEX, cwd, String(this.pid || ""), String(createdMs || 0)],
+      this.machine ? { on: this.machine } : undefined
+    );
     const found = res.code === 0 ? res.stdout.trim() : "";
     if (found) {
       this.miss = 0;
@@ -262,31 +311,38 @@ export class CodexTranscript {
 
   async refresh(agentWorking) {
     const path = await this.locate();
-    if (!path) return null;
+    if (!path) {
+      const changed = this._blocks === null || this._blocks.length > 0;
+      this._blocks = [];
+      return { blocks: this._blocks, changed };
+    }
     let stat = null;
     if (!this.machine) {
       try {
         stat = await fs.stat(path);
       } catch (_e) {}
     }
-    let chunk;
+    let lines;
     if (this.lines === 0) {
-      chunk = this.machine
-        ? await readTextFile(path, { on: this.machine })
-        : await fs.readFile(path, "utf8");
+      const tail = await readJsonlTail(path, INITIAL_TAIL_LINES, this.machine);
+      if (!tail) return null;
+      this.lines = tail.totalLines;
+      this.startLine = tail.startLine;
+      this.hasEarlier = tail.hasEarlier;
+      lines = tail.lines;
     } else if (stat && stat.size === this.size) {
-      chunk = "";
+      lines = [];
     } else {
       const res = await exec("tail", ["-n", `+${this.lines + 1}`, path], this.machine ? { on: this.machine } : undefined);
       if (res.code !== 0) return null;
-      chunk = res.stdout;
+      const end = res.stdout.lastIndexOf("\n");
+      const complete = end >= 0 ? res.stdout.slice(0, end) : "";
+      lines = complete ? complete.split("\n") : [];
+      this.lines += lines.length;
     }
     if (stat) this.size = stat.size;
-    const end = chunk.lastIndexOf("\n");
-    const complete = end >= 0 ? chunk.slice(0, end) : "";
-    const lines = complete ? complete.split("\n") : [];
     for (const line of lines) {
-      this.lines++;
+      this.rawLines.push(line);
       if (!line) continue;
       try {
         ingestCodexEntry(this, JSON.parse(line));
@@ -296,6 +352,31 @@ export class CodexTranscript {
     this._working = agentWorking;
     if (changed || !this._blocks) this._blocks = this.blocks(agentWorking);
     return { blocks: this._blocks, changed };
+  }
+
+  async loadEarlier(batchLines = EARLIER_BATCH_LINES) {
+    if (!this.path || !this.hasEarlier || this.startLine <= 1) {
+      return { blocks: this._blocks || [], changed: false, hasEarlier: false };
+    }
+    const from = Math.max(1, this.startLine - batchLines);
+    const to = this.startLine - 1;
+    const older = await readJsonlRange(this.path, from, to, this.machine);
+    this.startLine = from;
+    this.hasEarlier = from > 1;
+    if (!older.length) {
+      return { blocks: this._blocks || [], changed: false, hasEarlier: this.hasEarlier };
+    }
+    this.rawLines = [...older, ...this.rawLines];
+    this.items = [];
+    this.tools = new Map();
+    for (const line of this.rawLines) {
+      if (!line) continue;
+      try {
+        ingestCodexEntry(this, JSON.parse(line));
+      } catch (_e) {}
+    }
+    this._blocks = this.blocks(this._working);
+    return { blocks: this._blocks, changed: true, hasEarlier: this.hasEarlier };
   }
 
   blocks(agentWorking) {

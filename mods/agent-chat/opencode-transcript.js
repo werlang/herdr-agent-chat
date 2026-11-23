@@ -13,7 +13,7 @@
 import { exec, agents, terminals, home } from "herdr";
 import * as fs from "fs/promises";
 import { itemsToBlocks, terminalMachine } from "./transcript-blocks.js";
-import { buildOpenCodePollQuery, OpenCodeItemCache } from "./opencode-data.js";
+import { buildOpenCodePollQuery, buildOpenCodeEarlierQuery, OpenCodeItemCache } from "./opencode-data.js";
 
 export { textOf, clip, toolTitle, classifyTool, itemsToBlocks } from "./transcript-blocks.js";
 
@@ -51,6 +51,8 @@ export class OpenCodeTranscript {
     this.provider = null;
     this.effort = null;
     this.sessionModel = false; // true once session_v2 has supplied a model
+    this.minSeq = null;
+    this.hasEarlier = false;
     this._blocks = null;
     this._working = null;
     this.itemsCache = new OpenCodeItemCache();
@@ -128,6 +130,10 @@ export class OpenCodeTranscript {
     const term = terminals().find((t) => t.address === this.terminal);
     const title = (agent?.title || "").replace(/^OC\s*\|\s*/, "").trim();
     const cwd = term?.cwd || null;
+    const minCreatedMs =
+      !this.sessionId && !title && Number(term?.created_ms) > 0
+        ? Math.max(0, Number(term.created_ms) - 5000)
+        : 0;
     const sessionId =
       (Array.isArray(term?.records) ? term.records : [])
         .slice()
@@ -137,12 +143,28 @@ export class OpenCodeTranscript {
     this.itemsCache.rebuilds = 0;
 
     // One sqlite3 process resolves the session and returns its changed rows.
+    const initialLoad = this.messages.size === 0;
     const rows = await this.sql(
-      buildOpenCodePollQuery({ sessionId, title, cwd, since: this.since, knownSessionId: before })
+      buildOpenCodePollQuery({
+        sessionId,
+        title,
+        cwd,
+        since: this.since,
+        knownSessionId: before,
+        minCreatedMs,
+        limit: initialLoad ? 20 : 0,
+      })
     );
     if (!rows) return null;
     const sessionRow = rows.find((row) => row.kind === "session");
-    if (!sessionRow) return null;
+    if (!sessionRow) {
+      if ((term?.turn ?? 0) === 0 || minCreatedMs > 0) {
+        const changed = this._blocks === null || this._blocks.length > 0;
+        this._blocks = [];
+        return { blocks: this._blocks, changed };
+      }
+      return null;
+    }
 
     const changedSession = sessionRow.id !== this.sessionId;
     if (changedSession) {
@@ -150,15 +172,20 @@ export class OpenCodeTranscript {
       this.sessionModel = false;
       this.messages = new Map();
       this.since = 0;
+      this.minSeq = null;
+      this.hasEarlier = false;
       this._blocks = null;
       this.itemsCache.clear();
     }
     this.applySession(sessionRow);
 
     let changed = changedSession;
+    let messageCount = 0;
     for (const row of rows) {
       if (row.kind !== "message") continue;
+      messageCount++;
       this.since = Math.max(this.since, row.time_updated);
+      this.minSeq = this.minSeq === null ? row.seq : Math.min(this.minSeq, row.seq);
       const prev = this.messages.get(row.seq);
       // The newest row is re-read every poll (`>=`); only a different raw row
       // is new work, so an idle transcript rebuilds nothing.
@@ -170,11 +197,49 @@ export class OpenCodeTranscript {
         changed = true;
       } catch (_e) {}
     }
+    if (initialLoad || changedSession) {
+      this.hasEarlier = messageCount >= 20 && this.minSeq !== null && this.minSeq > 1;
+    }
     if (agentWorking !== this._working) changed = true;
     this._working = agentWorking;
     if (changed || !this._blocks) this._blocks = itemsToBlocks(this.items(), agentWorking);
     this.itemRebuilds = this.itemsCache.rebuilds;
     return { blocks: this._blocks, changed };
+  }
+
+  /** Fetches up to `limit` older messages before `this.minSeq` on scroll up. */
+  async loadEarlier(limit = 20) {
+    if (!this.sessionId || !this.hasEarlier || this.minSeq === null || this.minSeq <= 1) {
+      return { blocks: this._blocks || [], changed: false, hasEarlier: false };
+    }
+    const rows = await this.sql(
+      buildOpenCodeEarlierQuery({
+        sessionId: this.sessionId,
+        beforeSeq: this.minSeq,
+        limit,
+      })
+    );
+    if (!rows || rows.length === 0) {
+      this.hasEarlier = false;
+      return { blocks: this._blocks || [], changed: false, hasEarlier: false };
+    }
+    let changed = false;
+    for (const row of rows) {
+      this.minSeq = this.minSeq === null ? row.seq : Math.min(this.minSeq, row.seq);
+      if (this.messages.has(row.seq)) continue;
+      try {
+        const data = JSON.parse(row.data);
+        this.messages.set(row.seq, { type: row.type, data, raw: row.data });
+        this.itemsCache.set(row.seq, row.type, data);
+        changed = true;
+      } catch (_e) {}
+    }
+    this.hasEarlier = rows.length >= limit && this.minSeq !== null && this.minSeq > 1;
+    if (changed) {
+      this._blocks = itemsToBlocks(this.items(), this._working);
+      this.itemRebuilds = this.itemsCache.rebuilds;
+    }
+    return { blocks: this._blocks || [], changed, hasEarlier: this.hasEarlier };
   }
 
   /** Messages in order as chat items (user, thought, assistant, tool). */

@@ -6,8 +6,14 @@
 // (sessionId, cwd) → ~/.claude/projects/<cwd with non-alphanumerics as "-">/<sessionId>.jsonl.
 // The first read loads the whole file; later reads take only the lines appended
 // since (`tail -n +N`), so a poll costs one small process even for long sessions.
-import { hc, exec, home, readTextFile } from "herdr";
+import { hc, exec, home, readTextFile, terminals } from "herdr";
 import * as fs from "fs/promises";
+import {
+  INITIAL_TAIL_LINES,
+  EARLIER_BATCH_LINES,
+  readJsonlTail,
+  readJsonlRange,
+} from "./jsonl-tail.js";
 import {
   textOf,
   clip,
@@ -76,6 +82,9 @@ export class ClaudeTranscript {
     this.pid = null;
     this.pidAt = 0;
     this.size = 0;
+    this.startLine = 1;
+    this.hasEarlier = false;
+    this.rawLines = [];
     this._blocks = null;
     this._working = null;
   }
@@ -182,6 +191,9 @@ export class ClaudeTranscript {
     this.queuedPrompts = new Set();
     this.miss = null;
     this.size = 0;
+    this.startLine = 1;
+    this.hasEarlier = false;
+    this.rawLines = [];
     this._blocks = null;
     this._working = null;
     this.model = null;
@@ -197,7 +209,8 @@ export class ClaudeTranscript {
     const sessionBefore = this.sessionId;
     const path = await this.locate();
     if (!path) {
-      if (!this.fresh) return null;
+      const term = terminals().find((t) => t.address === this.terminal);
+      if (!this.fresh && (term?.turn ?? 0) !== 0) return null;
       const changed = this._blocks === null || this._blocks.length > 0 || sessionBefore !== this.sessionId;
       this._blocks = [];
       return { blocks: this._blocks, changed };
@@ -208,26 +221,28 @@ export class ClaudeTranscript {
         stat = await fs.stat(path);
       } catch (_e) {}
     }
-    let chunk;
+    let lines;
     if (this.lines === 0) {
-      chunk = this.machine
-        ? await readTextFile(path, { on: this.machine })
-        : await fs.readFile(path, "utf8");
+      const tail = await readJsonlTail(path, INITIAL_TAIL_LINES, this.machine);
+      if (!tail) return null;
+      this.lines = tail.totalLines;
+      this.startLine = tail.startLine;
+      this.hasEarlier = tail.hasEarlier;
+      lines = tail.lines;
     } else if (stat && stat.size === this.size) {
       // Nothing was appended; skip the `tail` process entirely.
-      chunk = "";
+      lines = [];
     } else {
       const res = await exec("tail", ["-n", `+${this.lines + 1}`, path], this.machine ? { on: this.machine } : undefined);
       if (res.code !== 0) return null;
-      chunk = res.stdout;
+      const end = res.stdout.lastIndexOf("\n");
+      const complete = end >= 0 ? res.stdout.slice(0, end) : "";
+      lines = complete ? complete.split("\n") : [];
+      this.lines += lines.length;
     }
     if (stat) this.size = stat.size;
-    // Only whole lines: a line still being written is read on the next poll.
-    const end = chunk.lastIndexOf("\n");
-    const complete = end >= 0 ? chunk.slice(0, end) : "";
-    const lines = complete ? complete.split("\n") : [];
     for (const line of lines) {
-      this.lines++;
+      this.rawLines.push(line);
       if (!line) continue;
       try {
         this.ingest(JSON.parse(line));
@@ -239,6 +254,33 @@ export class ClaudeTranscript {
     this._working = agentWorking;
     if (changed || !this._blocks) this._blocks = this.blocks(agentWorking);
     return { blocks: this._blocks, changed };
+  }
+
+  async loadEarlier(batchLines = EARLIER_BATCH_LINES) {
+    if (!this.path || !this.hasEarlier || this.startLine <= 1) {
+      return { blocks: this._blocks || [], changed: false, hasEarlier: false };
+    }
+    const from = Math.max(1, this.startLine - batchLines);
+    const to = this.startLine - 1;
+    const older = await readJsonlRange(this.path, from, to, this.machine);
+    this.startLine = from;
+    this.hasEarlier = from > 1;
+    if (!older.length) {
+      return { blocks: this._blocks || [], changed: false, hasEarlier: this.hasEarlier };
+    }
+    this.rawLines = [...older, ...this.rawLines];
+    this.items = [];
+    this.tools = new Map();
+    this.lastMessageId = null;
+    this.queuedPrompts = new Set();
+    for (const line of this.rawLines) {
+      if (!line) continue;
+      try {
+        this.ingest(JSON.parse(line));
+      } catch (_e) {}
+    }
+    this._blocks = this.blocks(this._working);
+    return { blocks: this._blocks, changed: true, hasEarlier: this.hasEarlier };
   }
 
   ingest(entry) {

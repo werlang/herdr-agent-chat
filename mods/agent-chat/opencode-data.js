@@ -209,13 +209,18 @@ export function buildOpenCodePollQuery({
   cwd = null,
   since = 0,
   knownSessionId = null,
+  minCreatedMs = 0,
+  limit = 0,
 } = {}) {
+  const minCreated = Number.isFinite(Number(minCreatedMs)) ? Math.max(0, Math.floor(Number(minCreatedMs))) : 0;
+  const maxRows = Number.isFinite(Number(limit)) ? Math.max(0, Math.floor(Number(limit))) : 0;
   const where = sessionId
     ? `id = ${q(sessionId)}`
     : [
         "parent_id is null",
         title ? `title = ${q(title)}` : null,
         !title && cwd ? `directory = ${q(cwd)}` : null,
+        !title && minCreated > 0 ? `time_created >= ${minCreated}` : null,
       ]
         .filter(Boolean)
         .join(" and ");
@@ -228,13 +233,24 @@ export function buildOpenCodePollQuery({
   const messagesWhere = knownSessionId
     ? `session_id = (select id from s) and (time_updated >= ${sinceMs} or (select id from s) <> ${q(knownSessionId)})`
     : `session_id = (select id from s) and time_updated >= ${sinceMs}`;
+  const messagesLimit = maxRows > 0 ? ` order by seq desc limit ${maxRows}` : "";
 
   return (
     `with s as (select id, model from session_v2 where ${where} order by ${orderBy} limit 1), ` +
-    `m as (select seq, type, time_updated, data from session_message where ${messagesWhere}) ` +
+    `m as (select seq, type, time_updated, data from session_message where ${messagesWhere}${messagesLimit}) ` +
     `select 0 as ord, 'session' as kind, s.id as id, s.model as model, null as seq, null as type, null as time_updated, null as data from s ` +
     `union all ` +
     `select 1 as ord, 'message' as kind, null as id, null as model, m.seq as seq, m.type as type, m.time_updated as time_updated, m.data as data from m ` +
     `order by ord, seq`
+  );
+}
+
+export function buildOpenCodeEarlierQuery({ sessionId, beforeSeq, limit = 20 } = {}) {
+  const maxRows = Number.isFinite(Number(limit)) ? Math.max(1, Math.floor(Number(limit))) : 20;
+  const seqCutoff = Number.isFinite(Number(beforeSeq)) ? Math.floor(Number(beforeSeq)) : 0;
+  return (
+    `select seq, type, time_updated, data from session_message ` +
+    `where session_id = ${q(sessionId)} and seq < ${seqCutoff} ` +
+    `order by seq desc limit ${maxRows}`
   );
 }

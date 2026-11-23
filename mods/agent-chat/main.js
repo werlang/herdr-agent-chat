@@ -12,7 +12,7 @@
 // load a page at a time. Only a bounded window of rows is built, so a long
 // session does not cost a full transcript render on every poll.
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, TextareaState, Textarea, Scrollbar, TextView } from "gpui-base";
+import { v_flex, h_flex, TextareaState, Textarea, TextView } from "gpui-base";
 import {
   hc,
   exec,
@@ -49,8 +49,12 @@ import {
   terminalLocalAddress,
   groupAntigravityModels,
   parseAntigravityModel,
+  computeFeedLayout,
   parseMarkdownBlocks,
   resolveInternalFileLink,
+  prependEarlierBlocks,
+  preserveScrollOnResize,
+  applyPrependAnchor,
 } from "./transcript-blocks.js";
 import { resolvePaneVisibility } from "./pane-visibility.js";
 import { demoBlocks } from "./demo-blocks.js";
@@ -63,10 +67,26 @@ import { AntigravityTranscript } from "./antigravity-transcript.js";
 /** Width of the reading column, in px. */
 const COLUMN = 760;
 
-/** Turns kept in the live window, and added per "Load earlier" click. */
-const FEED_WINDOW = 20;
-const FEED_PAGE = 60;
+/** Turns kept in the initial batch, and added per lazy-load batch. */
+const FEED_WINDOW = 8;
+const FEED_PAGE = 8;
 
+/**
+ * Installs app-wide keybindings for AgentChat once per process.
+ * @param {any} cx
+ */
+function ensureAgentChatKeyBindings(cx) {
+  if (globalThis.__agentChatKeyBindingsInstalled === true) return;
+  try {
+    cx.bind_keys([
+      { keystroke: "pageup", action: "agent-chat.page-up", context: "AgentChat" },
+      { keystroke: "pagedown", action: "agent-chat.page-down", context: "AgentChat" },
+      { keystroke: "home", action: "agent-chat.scroll-top", context: "AgentChat" },
+      { keystroke: "end", action: "agent-chat.scroll-bottom", context: "AgentChat" },
+    ]);
+    globalThis.__agentChatKeyBindingsInstalled = true;
+  } catch (_e) {}
+}
 /**
  * Claude Code's own `/model` picker, in its order. `/model <id>` switches the
  * session (and saves it as the default); "default" follows the account's
@@ -472,7 +492,10 @@ export default class AgentChat extends View {
     this.readingStart = 0;
     this.hasPending = false;
     this.windowStart = 0;
-    this._feedId = 0;
+    this.scrollY = 0;
+    this.scrollFromBottom = 0;
+    this._contentHeight = 0;
+    this._pendingPrepend = null;
     this._feedWidth = -1;
     this._feedHeight = -1;
     this._drawnStatus = "";
@@ -481,12 +504,14 @@ export default class AgentChat extends View {
     this.rawText = "";
     this.historyCache = new Map();
     this.rawHistoryCache = new Map();
+    this.terminalMetaCache = new Map();
     this.expanded = new Set();
     this.known = [];
     this._signature = "";
     this._updating = false;
     this._updatingSince = 0;
     this._generation = 0;
+    this._switchGen = 0;
     this._verifiedPaths = false;
     this.models = []; // OpenCode's catalogue: { id, modelID, providerID, name }
     this.providers = {}; // providerID → display name
@@ -495,8 +520,15 @@ export default class AgentChat extends View {
     this.modelsTerminal = null;
     this.modelsAt = 0;
     this.modelsLoading = false;
+    this._cliLines = 0;
+    this._cliFetching = false;
+    this._cliExhausted = false;
+    this._cliPageUps = 0;
+    this._transcriptFetching = false;
     this.hasFileEditor = false;
+    this._restoredScrollFor = null;
 
+    ensureAgentChatKeyBindings(cx);
     this.handle = cx.focus_handle();
 
     this.input = TextareaState.new({ placeholder: "Ask anything…", value: "", rows: 1 });
@@ -563,9 +595,29 @@ export default class AgentChat extends View {
     }
 
     this.updateGitBranch();
+    this.probeFileEditor(cx);
     this._shown = this.isShown();
     if (this._shown) this.update(cx);
     cx.timer.every(1000, (cx) => this.poll(cx));
+    cx.timer.every(15000, (cx) => this.probeFileEditor(cx));
+  }
+
+  /** Probes whether the optional `file-editor` mod is installed before wiring file links to it. */
+  probeFileEditor(cx) {
+    if (checking()) return;
+    cx.spawn(async (cx) => {
+      let installed = false;
+      try {
+        await readTextFile(`${appHome()}/mods/file-editor/mod.json`);
+        installed = true;
+      } catch (_e) {
+        installed = false;
+      }
+      if (this.hasFileEditor !== installed) {
+        this.hasFileEditor = installed;
+        cx.notify();
+      }
+    });
   }
 
   /**
@@ -600,11 +652,22 @@ export default class AgentChat extends View {
   switchTo(address, cx) {
     if (!address) return;
     this.terminal = address;
+    const term = terminals().find((t) => t.address === address);
+    const createdMs = term?.created_ms || 0;
+    if (this.terminalMetaCache.get(address) !== createdMs) {
+      this.terminalMetaCache.set(address, createdMs);
+      this.historyCache.delete(address);
+      this.rawHistoryCache.delete(address);
+    }
     // A poll still running for the previous agent must not land on this one:
     // a new generation makes it drop its result, and clearing the busy flag
     // lets the refresh below run now instead of being skipped.
     this._generation++;
+    this._switchGen++;
     this._updating = false;
+    this._contentHeight = 0;
+    this._pendingPrepend = null;
+    this.scrollY = 0;
     this.transcript = null;
     this.setBlocks(this.historyCache.get(address) || []);
     this.rawText = this.rawHistoryCache.get(address) || "";
@@ -614,6 +677,12 @@ export default class AgentChat extends View {
     this._blockKeys = "";
     this._lastText = undefined;
     this.expanded.clear();
+    this._cliLines = 0;
+    this._cliFetching = false;
+    this._cliExhausted = false;
+    this._cliPageUps = 0;
+    this._transcriptFetching = false;
+    this._restoredScrollFor = null;
     this.returnToLive(cx);
     this.updateGitBranch();
     this.refreshLater(cx);
@@ -678,6 +747,14 @@ export default class AgentChat extends View {
     try {
       if (!this.terminal) this.terminal = resolveTerminal();
       if (!this.terminal) return;
+      const term = terminals().find((t) => t.address === this.terminal);
+      const createdMs = term?.created_ms || 0;
+      if (this.terminalMetaCache.get(this.terminal) !== createdMs) {
+        this.terminalMetaCache.set(this.terminal, createdMs);
+        this.historyCache.delete(this.terminal);
+        this.rawHistoryCache.delete(this.terminal);
+        this.transcript = null;
+      }
       if (agentApp(findAgent(this.terminal)) === "opencode") this.refreshModels(cx);
 
       // Claude Code: read its own transcript (real Markdown, tool results).
@@ -686,7 +763,7 @@ export default class AgentChat extends View {
         return;
       }
 
-      const res = await hc(["read", this.terminal, "--lines", "200", "--json"]);
+      const res = await hc(["read", this.terminal, "--lines", String(this._cliLines ?? 0), "--json"]);
       if (gen !== this._generation) return;
       if (res.code !== 0 || !res.stdout) return;
       const data = JSON.parse(res.stdout);
@@ -799,7 +876,12 @@ export default class AgentChat extends View {
     this._blockKeys = blockKeys;
     this.setBlocks(blocks);
 
-    if (this.readingBlocks) {
+    if (this.restoreScrollState()) {
+      cx.notify();
+      return;
+    }
+
+    if (this.readingBlocks || !this.pinned) {
       const wasPending = this.hasPending;
       if (contentChanged) this.hasPending = true;
       // Repaint once when content starts queueing and on status changes. A
@@ -818,6 +900,102 @@ export default class AgentChat extends View {
     cx.notify();
   }
 
+  /** Persists the current scroll position per terminal in `shared("agent-chat.scrollState")`. */
+  saveScrollState() {
+    if (checking() || this.demo || !this.terminal) return;
+    try {
+      const current = shared("agent-chat.scrollState") || {};
+      const windowCount = this.readingBlocks
+        ? this.readingBlocks.length
+        : Math.max(FEED_WINDOW, this.blocks.length - this.windowStart);
+      shared("agent-chat.scrollState", {
+        ...current,
+        [this.terminal]: {
+          pinned: Boolean(this.pinned),
+          scrollY: this.scrollY || 0,
+          scrollFromBottom: this.scrollFromBottom || 0,
+          windowCount,
+        },
+      });
+    } catch (_e) {}
+  }
+
+  /**
+   * Restores saved scroll position once per terminal after blocks arrive.
+   * @returns {boolean} true if a non-pinned scroll position was restored.
+   */
+  restoreScrollState() {
+    if (!this.terminal || this.demo || this._restoredScrollFor === this.terminal || this.blocks.length === 0) {
+      return false;
+    }
+    this._restoredScrollFor = this.terminal;
+    try {
+      const saved = shared("agent-chat.scrollState")?.[this.terminal];
+      if (!saved || saved.pinned || (!(saved.scrollFromBottom > 0) && !(saved.scrollY >= 0))) return false;
+      const count = Math.max(FEED_WINDOW, saved.windowCount || FEED_WINDOW);
+      this.windowStart = Math.max(0, this.blocks.length - count);
+      this.readingStart = this.windowStart;
+      this.readingBlocks = cloneBlocks(this.blocks.slice(this.readingStart));
+      this.pinned = false;
+      this.hasPending = false;
+      this._drawnStatus = this.status;
+      const { maxScroll } = this.currentFeedLayout();
+      const restoredY = Number.isFinite(saved.scrollY)
+        ? saved.scrollY
+        : maxScroll - (saved.scrollFromBottom || 0);
+      this.scrollY = Math.max(0, Math.min(maxScroll, restoredY));
+      this.scrollFromBottom = Math.max(0, maxScroll - this.scrollY);
+      return true;
+    } catch (_e) {
+      return false;
+    }
+  }
+
+  /** Records the current real content height and scrollY before prepending older blocks. */
+  beginPrependAnchor() {
+    if (this._contentHeight > 0 && !this._pendingPrepend) {
+      this._pendingPrepend = {
+        prevHeight: this._contentHeight,
+        prevScrollY: this.scrollY || 0,
+      };
+    }
+  }
+
+  /**
+   * Tracks real rendered height of `#chat-feed-content` so prepending older batches
+   * shifts `scrollY` by the exact rendered pixel delta with zero jump.
+   * @param {{ width: number, height: number }} size
+   * @param {any} cx
+   */
+  onContentResize(size, cx) {
+    const height = Math.round(size.height);
+    if (height <= 0 || height === this._contentHeight) return;
+    this._contentHeight = height;
+    const vh = this._feedHeight > 0 ? this._feedHeight : 600;
+    const maxScroll = Math.max(0, height - vh);
+    if (this._pendingPrepend) {
+      const anchored = applyPrependAnchor(
+        this._pendingPrepend.prevScrollY,
+        this._pendingPrepend.prevHeight,
+        height
+      );
+      this._pendingPrepend = null;
+      this.scrollY = Math.max(0, Math.min(maxScroll, anchored));
+      this.scrollFromBottom = Math.max(0, maxScroll - this.scrollY);
+      this.saveScrollState();
+      cx.notify();
+      return;
+    }
+    if (this.pinned) {
+      this.scrollY = maxScroll;
+      this.scrollFromBottom = 0;
+    } else {
+      this.scrollY = Math.max(0, Math.min(maxScroll, this.scrollY || 0));
+      this.scrollFromBottom = Math.max(0, maxScroll - this.scrollY);
+    }
+    cx.notify();
+  }
+
   /**
    * Sets the feed's blocks and precomputes their row facts (see annotateRows),
    * so every place that replaces the feed goes through the same annotation.
@@ -829,77 +1007,324 @@ export default class AgentChat extends View {
     this.activeDetail = annotateRows(blocks, previous).activeDetail;
   }
 
-  /** The id the reversed scroll container and its Scrollbar share. */
-  feedScrollId() {
-    return `chat-feed-${this._feedId}`;
-  }
-
   /**
-   * Freezes the window the person is reading. The native reversed container
-   * already kept the newest turn at the bottom; from here on, new turns wait
+   * Freezes the window the person is reading. From here on, new turns wait
    * in `this.blocks` instead of moving their view.
    * @param {any} cx
    */
   startReading(cx) {
     if (this.readingBlocks) return;
+    if (this.pinned) {
+      const { maxScroll } = this.currentFeedLayout();
+      this.scrollY = maxScroll;
+      this.scrollFromBottom = 0;
+    }
     this.readingStart = this.windowStart;
     this.readingBlocks = cloneBlocks(this.blocks.slice(this.readingStart));
     this.pinned = false;
     this.hasPending = false;
     this._drawnStatus = this.status;
+    this.saveScrollState();
     cx.notify();
   }
 
   /**
-   * Adds one page of older turns above the current window. The reversed flex
-   * appends at the visual top, so the reading position below is untouched.
+   * Adds one batch of older turns above the current window. `beginPrependAnchor`
+   * captures the current rendered height so `onContentResize` locks the reading position.
    * @param {any} cx
    */
   loadEarlier(cx) {
+    if (!this.readingBlocks) this.startReading(cx);
     if (this.readingBlocks) {
       if (this.readingStart === 0) return;
+      this.beginPrependAnchor();
       const start = Math.max(0, this.readingStart - FEED_PAGE);
       const older = cloneBlocks(this.blocks.slice(start, this.readingStart));
       this.readingBlocks = older.concat(this.readingBlocks);
       this.readingStart = start;
     } else {
       if (this.windowStart === 0) return;
+      this.beginPrependAnchor();
       this.windowStart = Math.max(0, this.windowStart - FEED_PAGE);
+    }
+    this.saveScrollState();
+    cx.notify();
+  }
+
+  /**
+   * Returns to the live tail (`scrollFromBottom = 0`).
+   * @param {any} cx
+   */
+  returnToLive(cx) {
+    this._pendingPrepend = null;
+    this.readingBlocks = null;
+    this.readingStart = 0;
+    this.pinned = true;
+    this.scrollFromBottom = 0;
+    this.hasPending = false;
+    this.windowStart = Math.max(0, this.blocks.length - FEED_WINDOW);
+    this._drawnStatus = this.status;
+    this.scrollY = this.currentFeedLayout().maxScroll;
+    this.saveScrollState();
+    if (this._cliPageUps > 0 && this.terminal && !this.demo) {
+      const count = Math.min(this._cliPageUps, 12);
+      const terminal = this.terminal;
+      this._cliPageUps = 0;
+      cx.spawn(async () => {
+        for (let i = 0; i < count; i++) {
+          try {
+            await hc(["keys", terminal, "pagedown"]);
+          } catch (_e) {
+            break;
+          }
+        }
+      });
     }
     cx.notify();
   }
 
   /**
-   * Returns to the live tail and forces a fresh scroll state, which starts the
-   * reversed container at its bottom again.
+   * Queries the underlying CLI harness for older scrollback lines using native
+   * `pageup` keys + expanded `hc read --lines`, then prepends newly discovered blocks.
    * @param {any} cx
    */
-  returnToLive(cx) {
-    this.readingBlocks = null;
-    this.readingStart = 0;
-    this.pinned = true;
-    this.hasPending = false;
-    this._feedId++;
-    this.windowStart = Math.max(0, this.blocks.length - FEED_WINDOW);
-    this._drawnStatus = this.status;
+  fetchEarlierFromCli(cx) {
+    if (this._cliFetching || this._cliExhausted || this.demo || !this.terminal) return;
+    const terminal = this.terminal;
+    const switchGen = this._switchGen;
+    this._cliFetching = true;
+    cx.notify();
+
+    cx.spawn(async (cx) => {
+      try {
+        await hc(["keys", terminal, "pageup"]).catch(() => {});
+        this._cliPageUps = (this._cliPageUps || 0) + 1;
+        await new Promise((r) => setTimeout(r, 180));
+        if (switchGen !== this._switchGen || this.terminal !== terminal) return;
+
+        const nextLines = Math.min(4000, (this._cliLines || 0) + 80);
+        const res = await hc(["read", terminal, "--lines", String(nextLines), "--json"]);
+        if (switchGen !== this._switchGen || this.terminal !== terminal) return;
+        if (res.code !== 0 || !res.stdout) {
+          this._cliExhausted = true;
+          return;
+        }
+
+        const data = JSON.parse(res.stdout);
+        const parsed = parseConversation(data.text || "");
+        const { merged, addedCount } = prependEarlierBlocks(parsed, this.blocks);
+        this._cliLines = nextLines;
+        this.rawText = data.text || this.rawText;
+        this.rawHistoryCache.set(terminal, this.rawText);
+
+        if (addedCount > 0) {
+          if (!this.readingBlocks) this.startReading(cx);
+          this.beginPrependAnchor();
+          const keyed = assignKeys(merged.map((b) => ({ ...b })), this.blocks);
+          this.historyCache.set(terminal, keyed);
+          this.setBlocks(keyed);
+          if (this.readingBlocks) {
+            const older = cloneBlocks(keyed.slice(0, addedCount));
+            this.readingBlocks = older.concat(this.readingBlocks);
+            this.readingStart = 0;
+          } else {
+            this.windowStart = 0;
+          }
+          this._blockKeys = keyed.map((b) => b.key).join(",");
+          this._signature = `${this.status}|${this._blockKeys}`;
+          this.saveScrollState();
+        } else {
+          this._cliExhausted = true;
+        }
+      } catch (_err) {
+        // Leave existing feed intact on transient read error.
+      } finally {
+        if (switchGen === this._switchGen) {
+          this._cliFetching = false;
+          cx.notify();
+        }
+      }
+    });
+  }
+
+  /**
+   * Loads an older batch from the active transcript reader (JSONL tail or OpenCode SQLite)
+   * and prepends the newly discovered blocks above the current frozen window.
+   * @param {any} cx
+   */
+  fetchEarlierFromTranscript(cx) {
+    if (
+      this._transcriptFetching ||
+      !this.transcript?.hasEarlier ||
+      typeof this.transcript.loadEarlier !== "function" ||
+      this.demo
+    ) {
+      return;
+    }
+    const terminal = this.terminal;
+    const switchGen = this._switchGen;
+    const transcript = this.transcript;
+    this._transcriptFetching = true;
+    cx.notify();
+
+    cx.spawn(async (cx) => {
+      try {
+        const res = await transcript.loadEarlier();
+        if (switchGen !== this._switchGen || this.terminal !== terminal || this.transcript !== transcript) return;
+        if (res?.changed && Array.isArray(res.blocks)) {
+          if (!this.readingBlocks) this.startReading(cx);
+          this.beginPrependAnchor();
+          const keyed = assignKeys(res.blocks.map((b) => ({ ...b })), this.blocks);
+          const addedCount = Math.max(0, keyed.length - this.blocks.length);
+          this.historyCache.set(terminal, keyed);
+          this.setBlocks(keyed);
+          if (this.readingBlocks && addedCount > 0) {
+            const older = cloneBlocks(keyed.slice(0, addedCount));
+            this.readingBlocks = older.concat(this.readingBlocks);
+            this.readingStart = 0;
+          }
+          this._blockKeys = keyed.map((b) => b.key).join(",");
+          this._signature = `${this.status}|${this._blockKeys}`;
+          this.saveScrollState();
+        }
+      } catch (_err) {
+        // Keep current transcript window intact on transient read error.
+      } finally {
+        if (switchGen === this._switchGen) {
+          this._transcriptFetching = false;
+          cx.notify();
+        }
+      }
+    });
+  }
+
+  /**
+   * Computes current feed layout metrics for the visible batch.
+   * @returns {{ visible: Array<object>, start: number, totalHeight: number, maxScroll: number }}
+   */
+  currentFeedLayout() {
+    const frozen = this.readingBlocks;
+    const start = frozen ? this.readingStart : this.windowStart;
+    const visible = frozen || this.blocks.slice(this.windowStart);
+    const vh = this._feedHeight > 0 ? this._feedHeight : 600;
+    const colW = Math.min(COLUMN, this._feedWidth > 0 ? this._feedWidth : COLUMN);
+    const canFetchTranscript = Boolean(this.transcript?.hasEarlier) && !this.demo;
+    const canFetchCli = !this.transcript?.path && !this.transcript?.sessionId && !this._cliExhausted && !this.demo;
+    const hasLoadEarlier = start > 0 || canFetchTranscript || canFetchCli;
+    const est = computeFeedLayout(visible, this.expanded, vh, hasLoadEarlier, colW);
+    const totalHeight = this._contentHeight > 0 ? this._contentHeight : est.totalHeight;
+    const maxScroll = Math.max(0, totalHeight - vh);
+    return { visible, start, totalHeight, maxScroll };
+  }
+
+  /**
+   * Scrolls the feed by `deltaUpPx` (positive = up into history, negative = down toward live tail).
+   * Automatically lazy-loads older batches near the top and re-pins near the bottom.
+   * @param {number} deltaUpPx
+   * @param {any} cx
+   */
+  scrollFeedBy(deltaUpPx, cx) {
+    if (!deltaUpPx) return;
+    if (deltaUpPx > 0 && !this.readingBlocks) {
+      this.startReading(cx);
+    }
+    const { start, maxScroll } = this.currentFeedLayout();
+    const nextY = Math.max(0, Math.min(maxScroll, (this.scrollY || 0) - deltaUpPx));
+    this.scrollY = nextY;
+    this.scrollFromBottom = Math.max(0, maxScroll - nextY);
+
+    if (deltaUpPx > 0 && nextY <= 48) {
+      if (start > 0) {
+        this.loadEarlier(cx);
+        return;
+      }
+      if (this.transcript?.hasEarlier) {
+        this.fetchEarlierFromTranscript(cx);
+        return;
+      }
+      if (!this.transcript?.path && !this.transcript?.sessionId && !this._cliExhausted && !this.demo) {
+        this.fetchEarlierFromCli(cx);
+        return;
+      }
+    }
+    if (deltaUpPx < 0 && maxScroll - nextY <= 8) {
+      this.returnToLive(cx);
+      return;
+    }
+    this.saveScrollState();
     cx.notify();
   }
 
   /**
-   * Wheel over the feed: the native container scrolls itself. The first
-   * upward gesture freezes the window so new turns do not drag the view.
+   * Handles PageUp / PageDown scrolling and lazy batch discovery.
+   * @param {1 | -1} direction 1 = PageUp, -1 = PageDown
+   * @param {any} cx
+   */
+  pageScroll(direction, cx) {
+    if (this.blocks.length === 0) return;
+    const step = Math.max(200, (this._feedHeight > 0 ? this._feedHeight : 560) - 64);
+    const { start } = this.currentFeedLayout();
+    if (direction > 0 && (this.scrollY || 0) <= step) {
+      if (start > 0) {
+        if (!this.readingBlocks) this.startReading(cx);
+        this.loadEarlier(cx);
+      } else if (this.transcript?.hasEarlier) {
+        if (!this.readingBlocks) this.startReading(cx);
+        this.fetchEarlierFromTranscript(cx);
+      } else if (!this.transcript?.path && !this.transcript?.sessionId && !this._cliExhausted && !this.demo) {
+        if (!this.readingBlocks) this.startReading(cx);
+        this.fetchEarlierFromCli(cx);
+      }
+    }
+    this.scrollFeedBy(direction * step, cx);
+  }
+
+  /**
+   * Handles direct keydown events for PageUp/PageDown/Home/End.
+   * @param {any} event
+   * @param {any} cx
+   */
+  handleKeyDown(event, cx) {
+    const key = String(event?.keystroke || event?.key || "").toLowerCase();
+    if (key === "pageup") {
+      this.pageScroll(1, cx);
+      cx.stop_propagation?.();
+    } else if (key === "pagedown") {
+      this.pageScroll(-1, cx);
+      cx.stop_propagation?.();
+    } else if (key === "home") {
+      if (!this.readingBlocks) this.startReading(cx);
+      while (this.readingStart > 0) this.loadEarlier(cx);
+      const { maxScroll } = this.currentFeedLayout();
+      this.scrollY = 0;
+      this.scrollFromBottom = maxScroll;
+      this.saveScrollState();
+      cx.notify();
+      cx.stop_propagation?.();
+    } else if (key === "end") {
+      this.returnToLive(cx);
+      cx.stop_propagation?.();
+    }
+  }
+
+  /**
+   * Wheel over the feed: positive delta scrolls UP into history, negative scrolls DOWN.
    * @param {any} e
    * @param {any} cx
    */
   onFeedWheel(e, cx) {
-    const dy = e?.delta?.y ?? 0;
-    if (dy > 0 && !this.readingBlocks) this.startReading(cx);
+    const dy =
+      e?.delta?.y !== 0 && e?.delta?.y !== undefined
+        ? e.delta.y
+        : e?.delta_lines?.y
+          ? e.delta_lines.y * 24
+          : 0;
+    if (!dy) return;
+    this.scrollFeedBy(dy, cx);
   }
 
   /**
-   * The feed viewport changed height (composer growth, working line, resize).
-   * While live, a fresh scroll state re-anchors the reversed container at the
-   * bottom; while reading, leave the person's position alone.
+   * Tracks viewport dimensions so scroll bounds and PageUp/PageDown steps match the pane.
    * @param {{ width: number, height: number }} size
    * @param {any} cx
    */
@@ -909,10 +1334,16 @@ export default class AgentChat extends View {
     if (width === this._feedWidth && height === this._feedHeight) return;
     this._feedWidth = width;
     this._feedHeight = height;
-    if (!this.readingBlocks) {
-      this._feedId++;
-      cx.notify();
+    const nextMax = this.currentFeedLayout().maxScroll;
+    if (this.pinned) {
+      this.scrollY = nextMax;
+      this.scrollFromBottom = 0;
+    } else {
+      this.scrollY = Math.max(0, Math.min(nextMax, this.scrollY || 0));
+      this.scrollFromBottom = Math.max(0, nextMax - this.scrollY);
+      this.saveScrollState();
     }
+    cx.notify();
   }
 
   /**
@@ -1373,7 +1804,6 @@ export default class AgentChat extends View {
             .w_full()
             .max_w(COLUMN)
             .px(24)
-            .when(Boolean(bodyFont()), (el) => el.font_family(bodyFont()))
             .child(content)
         );
 
@@ -1426,6 +1856,7 @@ export default class AgentChat extends View {
                 div()
                   .text_size(14)
                   .line_height("22px")
+                  .when(Boolean(bodyFont()), (el) => el.font_family(bodyFont()))
                   .text_color(t.foreground)
                   .child(displayText)
               )
@@ -1460,19 +1891,16 @@ export default class AgentChat extends View {
             div()
               .w_full()
               .text_size(14)
-              .line_height("24px")
+              .line_height("22px")
+              .when(Boolean(bodyFont()), (el) => el.font_family(bodyFont()))
               .text_color(t.foreground)
               .child(
-                v_flex()
-                  .w_full()
-                  .gap(0)
-                  .children(
-                    (block.mdChunks || [{ id: `md-${block.key}`, text: block.text || "" }]).map((c) =>
-                      c.image
-                        ? this.renderImageRef(c.image, t, monoFont)
-                        : TextView.markdown(c.id, c.text).selectable(true)
-                    )
-                  )
+                this.renderMarkdownBlocks(
+                  block.mdBlocks || parseMarkdownBlocks(block.text || ""),
+                  t,
+                  monoFont,
+                  `md-${block.key}`
+                )
               )
           )
           // Assistant Message Meta bar
@@ -1502,6 +1930,15 @@ export default class AgentChat extends View {
                             .font_family(monoFont)
                             .text_size(11)
                             .text_color(t.dim)
+                            .when(this.hasFileEditor, (el) =>
+                              el
+                                .cursor_pointer()
+                                .hover((s) => s.bg(t.hover).text_color(t.foreground))
+                                .on_click((_e, cx) => {
+                                  cx.stop_propagation();
+                                  this.handleLinkClick(f, cx);
+                                })
+                            )
                             .child(basename(f))
                         )
                       )
@@ -1560,7 +1997,7 @@ export default class AgentChat extends View {
             .text_size(13)
             .line_height("21px")
             .text_color(t.dim)
-            .child(TextView.markdown(id, text).selectable(true))
+            .child(this.renderMarkdownBlocks(parseMarkdownBlocks(text || ""), t, monoFont, id))
         );
 
     if (block.type === "thought") {
@@ -2172,8 +2609,15 @@ export default class AgentChat extends View {
       .child(this.renderRow(block, t, monoFont));
   }
 
-  /** A pill that loads one page of older turns above the window. */
-  renderLoadEarlier(t, cx) {
+  /** A pill that loads one page of older turns above the window or fetches from transcript/CLI. */
+  renderLoadEarlier(t, cx, mode = "memory") {
+    const label = this._cliFetching
+      ? "Loading earlier from terminal…"
+      : this._transcriptFetching
+      ? "Loading earlier messages…"
+      : mode === "cli"
+      ? "Load earlier from terminal"
+      : "Load earlier messages";
     return h_flex()
       .w_full()
       .justify_center()
@@ -2191,9 +2635,13 @@ export default class AgentChat extends View {
           .border_color(t.border)
           .cursor_pointer()
           .hover((s) => s.bg(t.hover))
-          .on_click((_e, cx) => this.loadEarlier(cx))
+          .on_click((_e, cx) => {
+            if (mode === "memory") this.loadEarlier(cx);
+            else if (mode === "transcript") this.fetchEarlierFromTranscript(cx);
+            else this.fetchEarlierFromCli(cx);
+          })
           .child(svg("mods/agent-chat/icons/arrow-up.svg").size(12).text_color(t.dim))
-          .child(div().text_size(12).text_color(t.dim).child("Load earlier messages"))
+          .child(div().text_size(12).text_color(t.dim).child(label))
       );
   }
 
@@ -2231,28 +2679,28 @@ export default class AgentChat extends View {
   }
 
   /**
-   * The scrolling feed. Rows live in a reversed flex column: the first child is
-   * the visual bottom, so GPUI opens at the newest turn and keeps it there as
-   * content is added. The window is bounded, and older turns load a page at a
-   * time.
+   * The scrolling feed. Rows are laid out top-to-bottom in a deterministic
+   * viewport anchored by `scrollFromBottom` (`0` = pinned to live tail).
+   * Scrolling up freezes the window and lazy-loads older batches as needed.
    */
   renderFeed(t, monoFont, cx) {
     if (this.blocks.length === 0) return this.renderEmptyFeed(t);
-    const frozen = this.readingBlocks;
-    const start = frozen ? this.readingStart : this.windowStart;
-    const visible = frozen || this.blocks.slice(this.windowStart);
+    const { visible, start, maxScroll } = this.currentFeedLayout();
+    const scrollY = this.pinned ? maxScroll : Math.max(0, Math.min(maxScroll, this.scrollY || 0));
+    this.scrollY = scrollY;
+    this.scrollFromBottom = Math.max(0, maxScroll - scrollY);
 
-    // Children are pushed bottom-first for the reversed column. A filler at the
-    // very bottom only exists when the whole conversation fits, so a new chat
-    // reads top-down while a long one stays anchored to its tail.
     const children = [];
-    if (start === 0) children.push(div().w_full().flex_1());
-    children.push(div().w_full().h(24));
-    for (let i = visible.length - 1; i >= 0; i--) {
+    const canFetchTranscript = Boolean(this.transcript?.hasEarlier) && !this.demo;
+    const canFetchCli = !this.transcript?.path && !this.transcript?.sessionId && !this._cliExhausted && !this.demo;
+    if (start > 0) children.push(this.renderLoadEarlier(t, cx, "memory"));
+    else if (canFetchTranscript) children.push(this.renderLoadEarlier(t, cx, "transcript"));
+    else if (canFetchCli) children.push(this.renderLoadEarlier(t, cx, "cli"));
+    children.push(div().w_full().h(12));
+    for (let i = 0; i < visible.length; i++) {
       children.push(this.feedRow(visible[i], t, monoFont));
     }
-    children.push(div().w_full().h(12));
-    if (start > 0) children.push(this.renderLoadEarlier(t, cx));
+    children.push(div().w_full().h(24));
 
     return v_flex()
       .id("chat-feed-container")
@@ -2265,24 +2713,19 @@ export default class AgentChat extends View {
           .min_h(0)
           .w_full()
           .relative()
+          .overflow_hidden()
           .on_size_change((size, cx) => this.onFeedResize(size, cx))
           .on_scroll_wheel((e, cx) => this.onFeedWheel(e, cx))
           .child(
             v_flex()
-              .id(this.feedScrollId())
-              .size_full()
-              .flex_col_reverse()
-              .overflow_y_scroll()
-              .on_scroll_wheel((e, cx) => this.onFeedWheel(e, cx))
+              .id("chat-feed-content")
+              .relative()
+              .top(-scrollY)
+              .w_full()
+              .on_size_change((size, cx) => this.onContentResize(size, cx))
               .children(children)
           )
-          .child(
-            Scrollbar.vertical(this.feedScrollId())
-              .absolute()
-              .inset_0()
-              .on_mouse_down("left", (_e, cx) => this.startReading(cx))
-          )
-          .when(!this.pinned, (el) => el.child(this.renderScrollPill(t, cx)))
+          .when(!this.pinned && this.scrollFromBottom > 12, (el) => el.child(this.renderScrollPill(t, cx)))
       )
       .when(this.status === "working", (el) => el.child(this.renderWorkingBar(t)));
   }
@@ -3248,7 +3691,10 @@ export default class AgentChat extends View {
       readingStart: this.readingStart,
       windowStart: this.windowStart,
       hasPending: this.hasPending,
-      _feedId: this._feedId,
+      scrollY: this.scrollY,
+      scrollFromBottom: this.scrollFromBottom,
+      _contentHeight: this._contentHeight,
+      _pendingPrepend: this._pendingPrepend,
       _drawnStatus: this._drawnStatus,
       gitBranch: this.gitBranch,
     };
@@ -3338,6 +3784,20 @@ export default class AgentChat extends View {
     return v_flex()
       .id("agent-chat-view")
       .track_focus(this.handle)
+      .key_context("AgentChat")
+      .on_action("agent-chat.page-up", (_e, cx) => this.pageScroll(1, cx))
+      .on_action("agent-chat.page-down", (_e, cx) => this.pageScroll(-1, cx))
+      .on_action("agent-chat.scroll-top", (_e, cx) => {
+        if (!this.readingBlocks) this.startReading(cx);
+        while (this.readingStart > 0) this.loadEarlier(cx);
+        const { maxScroll } = this.currentFeedLayout();
+        this.scrollY = 0;
+        this.scrollFromBottom = maxScroll;
+        this.saveScrollState();
+        cx.notify();
+      })
+      .on_action("agent-chat.scroll-bottom", (_e, cx) => this.returnToLive(cx))
+      .on_key_down((event, cx) => this.handleKeyDown(event, cx))
       .size_full()
       .bg(t.background)
       .child(this.renderFeed(t, monoFont, cx))

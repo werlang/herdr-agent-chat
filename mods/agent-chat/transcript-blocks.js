@@ -1014,7 +1014,116 @@ export function groupAntigravityModels(models) {
   return [...byFamily.values()];
 }
 
+/**
+ * Estimates rendered height in pixels for a single feed block.
+ * @param {object} block
+ * @param {Set<string>} [expandedSet]
+ * @param {number} [columnWidth]
+ * @returns {number}
+ */
+export function estimateBlockHeight(block, expandedSet, columnWidth = 760) {
+  if (!block) return 0;
+  if (block.type === "spacer") return Number(block.size) || 12;
 
+  const ekey = block.ekey || "";
+  const open = Boolean(expandedSet && ekey && expandedSet.has(ekey));
+
+  if (block.type === "user") {
+    const raw = block.isLong && !open ? (block.preview ?? block.text ?? "") : (block.text ?? "");
+    const lines = String(raw).split("\n");
+    const wrapped = lines.reduce((sum, l) => sum + Math.max(1, Math.ceil(l.length / 62)), 0);
+    return 24 + 20 + (block.from ? 18 : 0) + (block.isLong ? 24 : 0) + wrapped * 22;
+  }
+
+  if (block.type === "assistant") {
+    const contentWidth = Math.max(240, Math.min(columnWidth, 760) - 48);
+    const mdBlocks = block.mdBlocks || parseMarkdownBlocks(block.text || "");
+    let h = 16;
+    if (mdBlocks.length > 0) {
+      for (let i = 0; i < mdBlocks.length; i++) {
+        if (i > 0) h += 10;
+        h += estimateMdBlockHeight(mdBlocks[i], contentWidth);
+      }
+    }
+    const meta = (block.changedFiles?.length || 0) > 0 ? 28 : 0;
+    return h + meta;
+  }
+
+  if (block.type === "thought") {
+    if (!open) return 28;
+    const lines = String(block.text || block.summary || "").split("\n").length;
+    return 28 + Math.min(280, Math.max(48, lines * 21 + 30));
+  }
+
+  if (block.type === "tool") {
+    if (!open || !block.detail) return 26;
+    const lines = String(block.detail).split("\n").length;
+    return 26 + Math.min(240, Math.max(44, lines * 18 + 30));
+  }
+
+  if (block.type === "tool_group") {
+    if (!open) return 28;
+    let h = 34;
+    const thoughts = block.thoughts || [];
+    for (let i = 0; i < thoughts.length; i++) {
+      if (!thoughts[i]?.text) continue;
+      h += 24;
+      if (expandedSet?.has(`${ekey}:thought${i}`)) {
+        const lines = String(thoughts[i].text).split("\n").length;
+        h += Math.min(280, Math.max(48, lines * 21 + 30));
+      }
+    }
+    const tools = block.tools || [];
+    for (let i = 0; i < tools.length; i++) {
+      h += 24;
+      if (tools[i]?.detail && expandedSet?.has(`${ekey}:tool${i}`)) {
+        const lines = String(tools[i].detail).split("\n").length;
+        h += Math.min(240, Math.max(44, lines * 18 + 30));
+      }
+    }
+    return h;
+  }
+
+  if (block.type === "notice") {
+    if (block.tone === "warning" || block.tone === "error") {
+      const lines = String(block.text || "").split("\n");
+      const wrapped = lines.reduce((sum, l) => sum + Math.max(1, Math.ceil(l.length / 76)), 0);
+      return 12 + Math.max(32, wrapped * 18 + 14);
+    }
+    return 34;
+  }
+
+  return 32;
+}
+
+/**
+ * Computes feed row offsets and scroll bounds for a top-to-bottom viewport.
+ * @param {Array<object>} blocks
+ * @param {Set<string>} [expandedSet]
+ * @param {number} [viewportHeight]
+ * @param {boolean} [hasEarlier]
+ * @param {number} [columnWidth]
+ * @returns {{ totalHeight: number, maxScroll: number, rowOffsets: number[] }}
+ */
+export function computeFeedLayout(
+  blocks = [],
+  expandedSet = null,
+  viewportHeight = 600,
+  hasEarlier = false,
+  columnWidth = 760
+) {
+  const vh = Math.max(100, Number(viewportHeight) || 600);
+  let y = (hasEarlier ? 44 : 0) + 12;
+  const rowOffsets = [];
+  for (const b of blocks) {
+    rowOffsets.push(y);
+    y += estimateBlockHeight(b, expandedSet, columnWidth);
+  }
+  y += 24;
+  const totalHeight = Math.max(vh, y);
+  const maxScroll = Math.max(0, totalHeight - vh);
+  return { totalHeight, maxScroll, rowOffsets };
+}
 
 
 
@@ -1181,6 +1290,63 @@ export function parseMarkdownBlocks(text) {
   return parseMdLines(source.replace(/\r\n?/g, "\n").split("\n"));
 }
 
+function estimateMdBlockHeight(block, width) {
+  if (!block) return 0;
+  switch (block.type) {
+    case "heading": {
+      const sizes = { 1: 22, 2: 18, 3: 16, 4: 14.5, 5: 14, 6: 13.5 };
+      const sz = sizes[block.level] || 14;
+      const charsPerLine = Math.max(12, Math.floor(width / (sz * 0.55)));
+      const lines = Math.max(1, Math.ceil((block.text || "").length / charsPerLine));
+      return lines * Math.round(sz * 1.35) + (block.level <= 2 ? 8 : 2);
+    }
+    case "paragraph": {
+      const charsPerLine = Math.max(16, Math.floor(width / 7.5));
+      const lines = Math.max(1, Math.ceil((block.text || "").length / charsPerLine));
+      return lines * 22;
+    }
+    case "code": {
+      const lines = (block.text || "").split("\n").length;
+      return lines * 19 + 26;
+    }
+    case "image":
+      return 38;
+    case "hr":
+      return 12;
+    case "quote": {
+      const innerWidth = Math.max(100, width - 20);
+      let h = 0;
+      const sub = block.blocks || [];
+      for (let i = 0; i < sub.length; i++) {
+        if (i > 0) h += 8;
+        h += estimateMdBlockHeight(sub[i], innerWidth);
+      }
+      return h + 4;
+    }
+    case "list": {
+      const innerWidth = Math.max(100, width - 32);
+      let h = 0;
+      const items = block.items || [];
+      for (let i = 0; i < items.length; i++) {
+        if (i > 0) h += 4;
+        let itemH = 0;
+        const sub = items[i].blocks || [];
+        for (let j = 0; j < sub.length; j++) {
+          if (j > 0) itemH += 6;
+          itemH += estimateMdBlockHeight(sub[j], innerWidth);
+        }
+        h += Math.max(22, itemH);
+      }
+      return h;
+    }
+    case "table": {
+      const rows = (block.rows || []).length + 1;
+      return rows * 30 + 6;
+    }
+    default:
+      return 22;
+  }
+}
 
 /**
  * Resolves an internal link or file path (`file:///...`, `/abs/path`, `rel/path#L10`)
@@ -1256,4 +1422,77 @@ export function resolveInternalFileLink(rawUrl, cwd = "") {
   if (!file) return null;
   const name = file.split("/").pop() || file;
   return { fullPath, folder, file, name, line };
+}
+
+/**
+ * Prepends newly discovered earlier CLI blocks above `currentBlocks`,
+ * deduplicating any overlap with the start of `currentBlocks`.
+ *
+ * @param {Array<object>} olderBlocks
+ * @param {Array<object>} currentBlocks
+ * @returns {{ merged: Array<object>, addedCount: number }}
+ */
+export function prependEarlierBlocks(olderBlocks = [], currentBlocks = []) {
+  if (!Array.isArray(olderBlocks) || olderBlocks.length === 0) {
+    return { merged: currentBlocks || [], addedCount: 0 };
+  }
+  if (!Array.isArray(currentBlocks) || currentBlocks.length === 0) {
+    return { merged: olderBlocks.slice(), addedCount: olderBlocks.length };
+  }
+  const head = currentBlocks[0];
+  const sameBlock = (a, b) =>
+    a &&
+    b &&
+    a.type === b.type &&
+    (a.text || "") === (b.text || "") &&
+    (a.title || "") === (b.title || "");
+
+  let overlapIdx = -1;
+  for (let i = olderBlocks.length - 1; i >= 0; i--) {
+    if (sameBlock(olderBlocks[i], head)) {
+      overlapIdx = i;
+      break;
+    }
+  }
+  if (overlapIdx > 0) {
+    const prefix = olderBlocks.slice(0, overlapIdx);
+    return { merged: prefix.concat(currentBlocks), addedCount: prefix.length };
+  }
+  if (overlapIdx === 0) {
+    return { merged: currentBlocks, addedCount: 0 };
+  }
+  const tail = olderBlocks[olderBlocks.length - 1];
+  const tailInCurrent = currentBlocks.some((b) => sameBlock(b, tail));
+  if (tailInCurrent) {
+    return { merged: currentBlocks, addedCount: 0 };
+  }
+  return { merged: olderBlocks.concat(currentBlocks), addedCount: olderBlocks.length };
+}
+
+/**
+ * Adjusts `scrollFromBottom` after a viewport resize so the top visible pixel
+ * (`scrollY = maxScroll - scrollFromBottom`) stays anchored at the same content.
+ *
+ * @param {number} scrollFromBottom
+ * @param {number} prevMaxScroll
+ * @param {number} nextMaxScroll
+ * @returns {number}
+ */
+export function preserveScrollOnResize(scrollFromBottom, prevMaxScroll, nextMaxScroll) {
+  const prevScrollY = Math.max(0, (prevMaxScroll || 0) - (scrollFromBottom || 0));
+  return Math.max(0, Math.min(nextMaxScroll || 0, (nextMaxScroll || 0) - prevScrollY));
+}
+
+/**
+ * Computes the exact new `scrollY` after prepending content above the viewport
+ * using the real measured content height delta so visible rows stay pixel-locked.
+ *
+ * @param {number} prevScrollY
+ * @param {number} prevHeight
+ * @param {number} newHeight
+ * @returns {number}
+ */
+export function applyPrependAnchor(prevScrollY, prevHeight, newHeight) {
+  const delta = Math.max(0, (newHeight || 0) - (prevHeight || 0));
+  return Math.max(0, (prevScrollY || 0) + delta);
 }
