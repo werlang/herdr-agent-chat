@@ -38,18 +38,18 @@ function basename(path) {
 
 /** Tool names categorized as read operations. */
 const READ_NAMES = new Set([
-  "read", "read_file", "view", "cat", "ls", "glob", "list_dir"
+  "read", "read_file", "view", "cat", "ls", "glob", "list_dir", "list_resources", "read_resource"
 ]);
 
 /** Tool names categorized as file edit/write operations. */
 const EDIT_NAMES = new Set([
-  "edit", "write", "multiedit", "notebookedit", "write_file", "edit_file",
+  "edit", "write", "create", "update", "multiedit", "notebookedit", "write_file", "edit_file",
   "replace_file_content", "multi_replace_file_content", "apply_patch", "patch"
 ]);
 
 /** Tool names categorized as command execution operations. */
 const COMMAND_NAMES = new Set([
-  "bash", "run", "exec", "run_command", "terminal", "shell"
+  "bash", "run", "exec", "exec_command", "write_stdin", "run_command", "terminal", "shell", "managetask", "manage_task"
 ]);
 
 /** Tool names categorized as local code search operations. */
@@ -75,10 +75,17 @@ export function extractChangedFiles(_name, input = {}, title = "") {
     if (input.file_path) files.push(String(input.file_path));
     if (input.filePath) files.push(String(input.filePath));
     if (input.path) files.push(String(input.path));
+    if (input.Path) files.push(String(input.Path));
     if (input.notebook_path) files.push(String(input.notebook_path));
     if (input.target_file) files.push(String(input.target_file));
+    if (input.TargetFile) files.push(String(input.TargetFile));
     if (Array.isArray(input.files)) files.push(...input.files.map(String));
     if (Array.isArray(input.paths)) files.push(...input.paths.map(String));
+    if (typeof input.patch === "string") {
+      for (const m of input.patch.matchAll(/^\*\*\*\s+(?:Update|Add|Delete)\s+File:\s+(.+)$/gm)) {
+        files.push(m[1].trim());
+      }
+    }
   }
   if (files.length === 0 && title) {
     const paren = String(title).match(/^(?:Edit|Edited|Updated|Created|Write)\s+\d+\s+files?\s*\(([^)]+)\)/i);
@@ -595,13 +602,17 @@ function firstMeaningfulCodeLine(code) {
  */
 export function toolTitle(name, input = {}) {
   input = input || {};
+  const filePath = input.file_path || input.filePath || input.Path || input.TargetFile || input.target_file || input.path;
   const pick =
     typeof input?.code === "string" && name === "execute"
       ? firstMeaningfulCodeLine(input.code)
-      : input.description ||
-        (input.file_path && basename(input.file_path)) ||
+      : input.toolSummary ||
+        input.description ||
+        (filePath && basename(String(filePath))) ||
         (input.notebook_path && basename(input.notebook_path)) ||
         input.command ||
+        input.CommandLine ||
+        input.cmd ||
         input.pattern ||
         input.query ||
         input.url ||

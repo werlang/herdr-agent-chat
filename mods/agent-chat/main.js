@@ -51,6 +51,8 @@ import { demoBlocks } from "./demo-blocks.js";
 import { pickBodyFont } from "./body-font.js";
 import { ClaudeTranscript } from "./claude-transcript.js";
 import { OpenCodeTranscript } from "./opencode-transcript.js";
+import { CodexTranscript } from "./codex-transcript.js";
+import { AntigravityTranscript } from "./antigravity-transcript.js";
 
 /** Width of the reading column, in px. */
 const COLUMN = 760;
@@ -82,12 +84,14 @@ const CLAUDE_EFFORTS = [
   { id: "max", label: "Max", note: "Most thorough, slowest" },
 ];
 
-/** Models Antigravity CLI can switch to. */
+/** Fallback models Antigravity CLI can switch to before `agy models` loads. */
 const ANTIGRAVITY_MODELS = [
-  { id: "gemini-3.8-flash-high", label: "Gemini 3.8 Flash (High)", note: "Fast with deep reasoning" },
-  { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash", note: "High speed for coding" },
-  { id: "gemini-3.8-pro", label: "Gemini 3.8 Pro", note: "Most complex reasoning" },
-  { id: "claude-3-7-sonnet", label: "Claude 3.7 Sonnet", note: "Hybrid reasoning" },
+  { id: "gemini-4-neon-medium", label: "Gemini 4 Neon" },
+  { id: "gemini-4-argon-medium", label: "Gemini 4 Argon" },
+  { id: "gemini-4-hydrogen-medium", label: "Gemini 4 Hydrogen" },
+  { id: "gemini-3.8-flash-medium", label: "Gemini 3.8 Flash" },
+  { id: "claude-opus-5-5-medium", label: "Claude Opus 5.5" },
+  { id: "claude-sonnet-5-5-medium", label: "Claude Sonnet 5.5" },
 ];
 
 /** Effort levels agents accept with `/effort <level>`. */
@@ -254,7 +258,7 @@ function screenModel(text) {
 function agentApp(agent) {
   if (agent?.app) return agent.app;
   const key = agent?.program?.key;
-  return { claude: "claude-code", opencode: "opencode", antigravity: "antigravity", agy: "antigravity" }[key] || key || null;
+  return { claude: "claude-code", opencode: "opencode", antigravity: "antigravity", agy: "antigravity", codex: "codex" }[key] || key || null;
 }
 
 /**
@@ -712,7 +716,13 @@ export default class AgentChat extends View {
    */
   async updateFromTranscript(cx, gen) {
     const live = findAgent(this.terminal);
-    const Reader = { "claude-code": ClaudeTranscript, opencode: OpenCodeTranscript }[agentApp(live)];
+    const Reader = {
+      "claude-code": ClaudeTranscript,
+      opencode: OpenCodeTranscript,
+      codex: CodexTranscript,
+      antigravity: AntigravityTranscript,
+      agy: AntigravityTranscript,
+    }[agentApp(live)];
     if (!Reader) return false;
     if (!(this.transcript instanceof Reader) || this.transcript.terminal !== this.terminal) {
       this.transcript = new Reader(this.terminal);
