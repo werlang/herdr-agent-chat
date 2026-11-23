@@ -449,9 +449,18 @@ export function splitImageLines(text, id) {
  * @param {string} text
  * @returns {{from: string, text: string}|null} null when the text is not wrapped
  */
+/**
+ * Unwraps `<hc from="tX">body</hc>` cross-agent messages.
+ * Suppresses `from` when the sender is a local `ppid:` process tag.
+ * @param {string} text
+ * @returns {{ from: string|null, text: string } | null}
+ */
 export function unwrapHc(text) {
-  const m = /^\s*<hc from="([^"]*)">([\s\S]*?)<\/hc>\s*$/.exec(typeof text === "string" ? text : "");
-  return m ? { from: m[1], text: m[2].trim() } : null;
+  const m = /^\s*<hc\b[^>]*\bfrom="([^"]*)"[^>]*>([\s\S]*?)<\/hc>\s*$/.exec(typeof text === "string" ? text : "");
+  if (!m) return null;
+  const sender = m[1].trim();
+  const from = !sender || /(?:^|\/)ppid:\d+$/.test(sender) ? null : sender;
+  return { from, text: m[2].trim() };
 }
 
 /**
@@ -489,7 +498,7 @@ export function annotateRows(blocks, previous = null) {
     } else if (b.type === "user") {
       const wrapped = unwrapHc(b.text);
       if (wrapped) {
-        b.from = wrapped.from;
+        if (wrapped.from) b.from = wrapped.from;
         b.text = wrapped.text;
       }
       if (old && old.text === b.text) {

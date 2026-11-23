@@ -8,32 +8,55 @@
 // since (`tail -n +N`), so a poll costs one small process even for long sessions.
 import { hc, exec, home } from "herdr";
 import * as fs from "fs/promises";
-import { textOf, clip, toolTitle, classifyTool, itemsToBlocks, settingChange } from "./transcript-blocks.js";
+import {
+  textOf,
+  clip,
+  toolTitle,
+  classifyTool,
+  itemsToBlocks,
+  settingChange,
+  terminalMachine,
+  terminalLocalAddress,
+  stripHarnessXml,
+} from "./transcript-blocks.js";
 
 export { textOf, clip, toolTitle, classifyTool, itemsToBlocks } from "./transcript-blocks.js";
 
 /** Wrapper tags Claude Code puts around non-conversation user entries. */
 const HIDDEN_USER = /^\s*<(system-reminder|local-command-stdout|local-command-stderr|local-command-caveat|task-notification|bash-input|bash-stdout|bash-stderr)\b/;
 
+/** Harness-injected user origins that are not typed by the human. */
+const HIDDEN_ORIGINS = new Set([
+  "task-notification",
+  "task_notification",
+  "auto-continuation",
+  "auto_continuation",
+  "peer",
+]);
+
 /**
- * A user string entry as the person typed it, or null when it is plumbing.
+ * A user string entry as the person typed it, or null when it is harness plumbing.
  * @param {string} raw
  * @returns {string|null}
  */
-function userText(raw) {
+export function claudeUserText(raw) {
   if (typeof raw !== "string") return null;
   // Model and effort switches show as a notice from their output instead.
   if (/<command-name>\/?(model|effort)<\/command-name>/.test(raw)) return null;
   if (HIDDEN_USER.test(raw)) return null;
   if (raw.startsWith("Caveat:")) return null;
   if (raw.startsWith("[Request interrupted")) return null;
+  if (raw.startsWith("Base directory for this skill:")) return null;
+  if (raw.startsWith("This session is being continued from a previous conversation")) return null;
+  if (/^\[Image:\s*source:[^\]]+\]\s*$/i.test(raw.trim())) return null;
   const cmd = raw.match(/<command-name>([^<]*)<\/command-name>/);
   if (cmd) {
     const args = raw.match(/<command-args>([^<]*)<\/command-args>/)?.[1]?.trim();
     const name = cmd[1].trim();
     return `${name.startsWith("/") ? name : "/" + name}${args ? " " + args : ""}`;
   }
-  return raw.trim() || null;
+  const cleaned = stripHarnessXml(raw);
+  return cleaned || null;
 }
 
 export class ClaudeTranscript {
@@ -45,6 +68,7 @@ export class ClaudeTranscript {
     this.items = [];
     this.tools = new Map();
     this.lastMessageId = null;
+    this.queuedPrompts = new Set();
     this.miss = null;
     this.pid = null;
     this.pidAt = 0;
@@ -126,6 +150,7 @@ export class ClaudeTranscript {
     this.items = [];
     this.tools = new Map();
     this.lastMessageId = null;
+    this.queuedPrompts = new Set();
     this.miss = null;
     this.size = 0;
     this._blocks = null;
@@ -190,16 +215,39 @@ export class ClaudeTranscript {
     const att = entry.type === "attachment" ? entry.attachment : null;
     if (att?.type === "queued_command" && att.origin?.kind === "human") {
       const images = Array.isArray(att.prompt) ? att.prompt.filter((p) => p?.type === "image").length : 0;
-      let text = userText(typeof att.prompt === "string" ? att.prompt : textOf(att.prompt)) || "";
+      let text = claudeUserText(typeof att.prompt === "string" ? att.prompt : textOf(att.prompt)) || "";
       if (images) text = `${text}${text ? "\n\n" : ""}${images === 1 ? "🖼 1 image" : `🖼 ${images} images`}`;
-      if (text) this.items.push({ type: "user", text });
+      if (text) {
+        this.queuedPrompts.add(text);
+        this.items.push({ type: "user", text });
+      }
       return;
     }
 
     const content = entry.message?.content;
+    const originKind = entry.origin?.kind || entry.turnOrigin?.kind || "";
 
     if (entry.type === "user") {
-      if (entry.isMeta || entry.isCompactSummary) return;
+      if (entry.isCompactSummary) {
+        this.items.push({ type: "notice", tone: "info", text: "Conversation compacted" });
+        return;
+      }
+      if (entry.isMeta || entry.promptSource === "system" || HIDDEN_ORIGINS.has(originKind)) {
+        // Still allow tool_result blocks if a meta entry carries them.
+        if (Array.isArray(content)) {
+          for (const part of content) {
+            if (part?.type === "tool_result") {
+              const tool = this.tools.get(part.tool_use_id);
+              if (tool) {
+                tool.detail = clip(textOf(part.content));
+                tool.status = part.is_error ? "error" : "done";
+                tool.hasFailure = Boolean(part.is_error);
+              }
+            }
+          }
+        }
+        return;
+      }
       const change = settingChange(typeof content === "string" ? content : textOf(content));
       if (change) {
         if (change.model) {
@@ -210,11 +258,14 @@ export class ClaudeTranscript {
           this.effort = change.effort;
           this.items.push({ type: "notice", tone: "info", text: `Effort set to ${change.effort}` });
         }
+        if (change.notice) {
+          this.items.push({ type: "notice", tone: "info", text: change.notice });
+        }
         return;
       }
       if (typeof content === "string") {
-        const text = userText(content);
-        if (text) this.items.push({ type: "user", text });
+        const text = claudeUserText(content);
+        if (text && !this.queuedPrompts.delete(text)) this.items.push({ type: "user", text });
         return;
       }
       if (!Array.isArray(content)) return;
@@ -229,14 +280,14 @@ export class ClaudeTranscript {
             tool.hasFailure = Boolean(part.is_error);
           }
         } else if (part?.type === "text") {
-          const t = userText(part.text);
+          const t = claudeUserText(part.text);
           if (t) text += (text ? "\n" : "") + t;
         } else if (part?.type === "image") {
           images++;
         }
       }
       if (images) text = `${text}${text ? "\n\n" : ""}${images === 1 ? "🖼 1 image" : `🖼 ${images} images`}`;
-      if (text) this.items.push({ type: "user", text });
+      if (text && !this.queuedPrompts.delete(text)) this.items.push({ type: "user", text });
       return;
     }
 

@@ -91,7 +91,9 @@ function stripBottomChrome(lines) {
     if (
       /^(?:esc to cancel|ctrl\+c to cancel|\? for shortcuts|\[hc\]|└\s*Tip:)/i.test(line) ||
       /(?:esc to cancel|\? for shortcuts|\/artifact to review)/i.test(line) ||
-      /^(?:Gemini|Claude|OpenCode|Codex)\s+[\w\.\s\·]+$/i.test(line) ||
+      /^(?:Gemini|Claude|OpenCode|Codex)\s+[\w.\s·]+$/i.test(line) ||
+      /^[a-z0-9][a-z0-9._-]+(?:\s+(?:low|medium|high|xhigh|extra high|max|ultra))?\s+·\s+\d+%\s+left\b/i.test(line) ||
+      /^(?:tab\s+agents?|ctrl\+p\s+commands?|ctrl\+t\s+variants?)/i.test(line) ||
       /●\s+\[[\d:]+\]\s+hc\s+wait/i.test(line)
     ) {
       endIndex--;
@@ -192,8 +194,14 @@ export function parseConversation(rawText) {
       continue;
     }
 
+    // Skip Claude session feedback prompts
+    if (/^How is Claude doing this session\b/i.test(trimmed) || /^1:\s*Bad\s+2:\s*Fine\b/i.test(trimmed)) {
+      pushCurrent();
+      continue;
+    }
+
     // User turn detection
-    const userMatch = trimmed.match(/^(?:>|❯|User:|Human:)\s*(.*)$/);
+    const userMatch = trimmed.match(/^(?:>|❯|›|User:|Human:)\s*(.*)$/);
     if (userMatch) {
       pushCurrent();
       currentBlock = { type: "user", lines: userMatch[1] ? [userMatch[1]] : [] };
@@ -238,14 +246,14 @@ export function parseConversation(rawText) {
 
     // Tool executions
     const isSpinner = SPINNER_REGEX.test(trimmed);
-    const isBulletTool = /^[●○…]\s*(Ran|Running|Explored|Read|Edited|Updated|Created|Write|Bash|\d+\s+more\s+actions)\b/i.test(trimmed);
-    const isGenericTool = /^[●○]\s+(.+)$/.test(trimmed);
+    const isBulletTool = /^[●○•…]\s*(Ran|Running|Explored|Read|Edited|Updated|Created|Write|Bash|Searched|Called|\d+\s+more\s+actions)\b/i.test(trimmed);
+    const isParenTool = /^[●○•]\s+[A-Za-z_][A-Za-z0-9_.:-]*\(/.test(trimmed);
 
-    if (isSpinner || isBulletTool || isGenericTool) {
+    if (isSpinner || isBulletTool || isParenTool) {
       pushCurrent();
       const isRunning = isSpinner || /Running/i.test(trimmed);
       let cleanTitle = trimmed
-        .replace(/^[●○…\s⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷]+/, "")
+        .replace(/^[●○•…\s⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷]+/, "")
         .replace(/\(ctrl\+o to expand\)/i, "")
         .trim();
       currentBlock = {
@@ -279,8 +287,10 @@ export function parseConversation(rawText) {
       }
     }
 
-    // Assistant response lines
-    const normalizedLine = line.replace(/^(\s*)[•◦]\s+/, "$1- ");
+    // Assistant response lines (strip Claude's leading ● marker on prose, convert •/◦ bullets to markdown)
+    const normalizedLine = line
+      .replace(/^(\s*)●\s+/, "$1")
+      .replace(/^(\s*)[•◦]\s+/, "$1- ");
     if (!currentBlock || currentBlock.type !== "assistant") {
       pushCurrent();
       currentBlock = { type: "assistant", lines: [normalizedLine] };

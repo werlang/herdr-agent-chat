@@ -1,7 +1,7 @@
 // Pure helpers for the OpenCode store: one SQLite poll, per-message chat items,
 // and a per-seq item cache. Kept free of the `herdr` module so tests can run
 // under plain Node.
-import { clip, textOf, toolTitle, classifyTool } from "./transcript-blocks.js";
+import { clip, textOf, toolTitle, classifyTool, stripHarnessXml } from "./transcript-blocks.js";
 
 const q = (s) => `'${String(s).replace(/'/g, "''")}'`;
 
@@ -38,7 +38,8 @@ export function messageItems(seq, type, data) {
   const items = [];
   if (type === "user") {
     const files = Array.isArray(data?.files) ? data.files.length : 0;
-    let text = (data?.text || "").trim();
+    let text = stripHarnessXml(data?.text || "");
+    if (/^\/(?:models?|effort)\b/i.test(text)) return { items, model: null, effort: null, hasModel: false };
     if (files) text = `${text}${text ? "\n\n" : ""}${files === 1 ? "🖼 1 file" : `🖼 ${files} files`}`;
     if (text) items.push({ type: "user", text });
     return { items, model: null, effort: null, hasModel: false };
