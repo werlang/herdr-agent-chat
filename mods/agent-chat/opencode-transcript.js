@@ -12,10 +12,18 @@
 // `time_updated` moved are fetched.
 import { exec, agents, terminals, home } from "herdr";
 import * as fs from "fs/promises";
-import { itemsToBlocks } from "./transcript-blocks.js";
+import { itemsToBlocks, terminalMachine } from "./transcript-blocks.js";
 import { buildOpenCodePollQuery, OpenCodeItemCache } from "./opencode-data.js";
 
 export { textOf, clip, toolTitle, classifyTool, itemsToBlocks } from "./transcript-blocks.js";
+
+const PY_SQLITE_READER = [
+  "import json, sqlite3, sys",
+  "con = sqlite3.connect(f'file:{sys.argv[1]}?mode=ro', uri=True)",
+  "con.row_factory = sqlite3.Row",
+  "rows = [dict(r) for r in con.execute(sys.argv[2])]",
+  "print(json.dumps(rows))",
+].join("; ");
 
 /**
  * Formats a model id into a human-readable name.
@@ -34,6 +42,8 @@ function prettyModel(id) {
 export class OpenCodeTranscript {
   constructor(terminal) {
     this.terminal = terminal;
+    this.machine = terminalMachine(terminal);
+    this.remoteHome = null;
     this.sessionId = null;
     this.messages = new Map(); // seq → { type, data, raw }
     this.since = 0;
@@ -47,6 +57,17 @@ export class OpenCodeTranscript {
     this.itemRebuilds = 0;
   }
 
+  async resolveHome() {
+    if (!this.machine) return home();
+    if (this.remoteHome) return this.remoteHome;
+    const res = await exec("sh", ["-lc", 'printf "%s" "$HOME"'], { on: this.machine });
+    if (res.code === 0 && res.stdout.trim()) {
+      this.remoteHome = res.stdout.trim();
+      return this.remoteHome;
+    }
+    return null;
+  }
+
   get db() {
     return `${home()}/.local/share/opencode/opencode.db`;
   }
@@ -57,11 +78,19 @@ export class OpenCodeTranscript {
 
   /**
    * Executes a read-only SQLite query and returns JSON rows.
-   * Uses a sanitized terminal scratch path to prevent invalid paths from remote terminals.
+   * Uses a sanitized terminal scratch path locally, and python3 sqlite3 on remote hosts.
    * @param {string} query
    * @returns {Promise<any[]|null>}
    */
   async sql(query) {
+    if (this.machine) {
+      const h = await this.resolveHome();
+      if (!h) return null;
+      const dbPath = `${h}/.local/share/opencode/opencode.db`;
+      const res = await exec("python3", ["-c", PY_SQLITE_READER, dbPath, query], { on: this.machine });
+      if (res.code !== 0) return null;
+      return res.stdout.trim() ? JSON.parse(res.stdout) : [];
+    }
     await fs.mkdir(this.scratch, { recursive: true });
     const safeTerm = String(this.terminal || "").replace(/[^A-Za-z0-9_-]/g, "_");
     const out = `${this.scratch}/opencode-${safeTerm}.json`;

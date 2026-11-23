@@ -6,7 +6,7 @@
 // (sessionId, cwd) → ~/.claude/projects/<cwd with non-alphanumerics as "-">/<sessionId>.jsonl.
 // The first read loads the whole file; later reads take only the lines appended
 // since (`tail -n +N`), so a poll costs one small process even for long sessions.
-import { hc, exec, home } from "herdr";
+import { hc, exec, home, readTextFile } from "herdr";
 import * as fs from "fs/promises";
 import {
   textOf,
@@ -62,6 +62,9 @@ export function claudeUserText(raw) {
 export class ClaudeTranscript {
   constructor(terminal) {
     this.terminal = terminal;
+    this.machine = terminalMachine(terminal);
+    this.localTerminal = terminalLocalAddress(terminal);
+    this.remoteHome = null;
     this.path = null;
     this.sessionId = null;
     this.lines = 0;
@@ -75,6 +78,17 @@ export class ClaudeTranscript {
     this.size = 0;
     this._blocks = null;
     this._working = null;
+  }
+
+  async resolveHome() {
+    if (!this.machine) return home();
+    if (this.remoteHome) return this.remoteHome;
+    const res = await exec("sh", ["-lc", 'printf "%s" "$HOME"'], { on: this.machine });
+    if (res.code === 0 && res.stdout.trim()) {
+      this.remoteHome = res.stdout.trim();
+      return this.remoteHome;
+    }
+    return null;
   }
 
   /**
@@ -94,10 +108,14 @@ export class ClaudeTranscript {
     }
     const pid = this.pid;
     if (!pid) return null;
-    const h = home();
+    const h = await this.resolveHome();
+    if (!h) return null;
     let session;
     try {
-      session = JSON.parse(await fs.readFile(`${h}/.claude/sessions/${pid}.json`, "utf8"));
+      const rawSession = this.machine
+        ? await readTextFile(`${h}/.claude/sessions/${pid}.json`, { on: this.machine })
+        : await fs.readFile(`${h}/.claude/sessions/${pid}.json`, "utf8");
+      session = JSON.parse(rawSession);
     } catch (_e) {
       // The pid may have been replaced since the last `hc get`: retry it next poll.
       this.pidAt = 0;
@@ -114,6 +132,17 @@ export class ClaudeTranscript {
 
     const file = `${session.sessionId}.jsonl`;
     const guess = `${h}/.claude/projects/${String(session.cwd || "").replace(/[^A-Za-z0-9]/g, "-")}/${file}`;
+    if (this.machine) {
+      const check = await exec("sh", ["-lc", `if [ -f "$1" ]; then printf "%s" "$1"; else ls -1 "$2"/*/"$3" 2>/dev/null | head -n1; fi`, "_", guess, `${h}/.claude/projects`, file], { on: this.machine });
+      const found = check.code === 0 ? check.stdout.trim() : "";
+      if (found) {
+        this.miss = null;
+        return (this.path = found);
+      }
+      this.miss = { sessionId: session.sessionId, at: Date.now() };
+      return null;
+    }
+
     if (await fs.exists(guess)) {
       this.miss = null;
       return (this.path = guess);
@@ -174,17 +203,21 @@ export class ClaudeTranscript {
       return { blocks: this._blocks, changed };
     }
     let stat = null;
-    try {
-      stat = await fs.stat(path);
-    } catch (_e) {}
+    if (!this.machine) {
+      try {
+        stat = await fs.stat(path);
+      } catch (_e) {}
+    }
     let chunk;
     if (this.lines === 0) {
-      chunk = await fs.readFile(path, "utf8");
+      chunk = this.machine
+        ? await readTextFile(path, { on: this.machine })
+        : await fs.readFile(path, "utf8");
     } else if (stat && stat.size === this.size) {
       // Nothing was appended; skip the `tail` process entirely.
       chunk = "";
     } else {
-      const res = await exec("tail", ["-n", `+${this.lines + 1}`, path]);
+      const res = await exec("tail", ["-n", `+${this.lines + 1}`, path], this.machine ? { on: this.machine } : undefined);
       if (res.code !== 0) return null;
       chunk = res.stdout;
     }

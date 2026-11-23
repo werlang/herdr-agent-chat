@@ -37,7 +37,15 @@ import {
   summarizeToolGroup,
   classifyTool,
 } from "./parser.js";
-import { annotateRows, contentHash, liveThoughtLine } from "./transcript-blocks.js";
+import {
+  annotateRows,
+  contentHash,
+  liveThoughtLine,
+  terminalMachine,
+  terminalLocalAddress,
+  groupAntigravityModels,
+  parseAntigravityModel,
+} from "./transcript-blocks.js";
 import { resolvePaneVisibility } from "./pane-visibility.js";
 import { demoBlocks } from "./demo-blocks.js";
 import { pickBodyFont } from "./body-font.js";
@@ -904,6 +912,24 @@ export default class AgentChat extends View {
     });
   }
 
+  /**
+   * Sends text to `this.terminal`, running `hc send` on the target machine
+   * when remote so `hc` does not wrap the message in `<hc from="…/ppid:…">`.
+   */
+  async sendTextToTerminal(text, { force = false } = {}) {
+    const machine = terminalMachine(this.terminal);
+    const localAddr = terminalLocalAddress(this.terminal);
+    const args = force ? ["send", "--force", localAddr, text] : ["send", localAddr, text];
+    if (!machine) {
+      await hcOrThrow(["send", ...(force ? ["--force"] : []), this.terminal, text]);
+      return;
+    }
+    const res = await exec("hc", args, { on: machine });
+    if (res.code !== 0) {
+      throw new Error((res.stderr || res.stdout || "").trim() || `hc ${args[0]} failed (${res.code})`);
+    }
+  }
+
   /** Sends the composer input or attached images to the agent terminal. */
   send(cx) {
     const val = (this.input.value() || "").trim();
@@ -913,10 +939,8 @@ export default class AgentChat extends View {
         if (!val) {
           // Only images attached: submit what the agent already holds.
           await hcOrThrow(["keys", this.terminal, "enter"]);
-        } else if (this.status === "blocked") {
-          await hcOrThrow(["send", "--force", this.terminal, val]);
         } else {
-          await hcOrThrow(["send", this.terminal, val]);
+          await this.sendTextToTerminal(val, { force: this.status === "blocked" });
         }
         this.input.set_value("");
         this.attached = 0;
@@ -2131,7 +2155,7 @@ export default class AgentChat extends View {
     if (!force && this.modelsAt && Date.now() - this.modelsAt < 60_000) return;
     this.modelsLoading = true;
     cx.notify();
-    const on = spaces().find((s) => s.active)?.machine ?? null;
+    const on = terminalMachine(this.terminal) ?? spaces().find((s) => s.active)?.machine ?? null;
     cx.spawn(async (cx) => {
       try {
         const [catalogue, providerList] = await Promise.all([
