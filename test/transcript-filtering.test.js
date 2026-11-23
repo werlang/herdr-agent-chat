@@ -22,6 +22,9 @@ const {
   extractChangedFiles,
   estimateBlockHeight,
   computeFeedLayout,
+  parseClaudeModelsResponse,
+  parseCodexModelsResponse,
+  parseAntigravityModelsOutput,
   parseMarkdownBlocks,
   resolveInternalFileLink,
   prependEarlierBlocks,
@@ -221,6 +224,69 @@ test("OpenCode query isolates new sessions via minCreatedMs when title and sessi
   const sql = buildOpenCodePollQuery({ cwd: "/repo", minCreatedMs: 1795450000000 });
   assert.match(sql, /time_created >= 1795450000000/);
   assert.match(sql, /directory = '\/repo'/);
+});
+
+test("harness discovery parsers extract models and capabilities from CLI outputs", () => {
+  const claudeOut = [
+    '{"type":"system","subtype":"hook_started"}',
+    JSON.stringify({
+      type: "control_response",
+      response: {
+        subtype: "success",
+        response: {
+          models: [
+            {
+              value: "fable",
+              resolvedModel: "claude-fable-5-2",
+              displayName: "Fable",
+              description: "Fable 5.2",
+              supportsEffort: true,
+              supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"],
+            },
+          ],
+        },
+      },
+    }),
+  ].join("\n");
+  const claudeModels = parseClaudeModelsResponse(claudeOut);
+  assert.equal(claudeModels.length, 1);
+  assert.equal(claudeModels[0].id, "fable");
+  assert.equal(claudeModels[0].resolvedModel, "claude-fable-5-2");
+  assert.deepEqual(claudeModels[0].efforts, ["low", "medium", "high", "xhigh", "max"]);
+
+  const codexOut = [
+    '{"id":1,"result":{"userAgent":"herdr"}}',
+    JSON.stringify({
+      id: 2,
+      result: {
+        data: [
+          {
+            id: "gpt-6.2-sol",
+            displayName: "GPT-6.2-Sol",
+            description: "Go-to model",
+            hidden: false,
+            defaultReasoningEffort: "medium",
+            supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "high" }],
+          },
+          { id: "hidden-model", hidden: true },
+        ],
+      },
+    }),
+  ].join("\n");
+  const codexModels = parseCodexModelsResponse(codexOut);
+  assert.equal(codexModels.length, 1);
+  assert.equal(codexModels[0].slug, "gpt-6.2-sol");
+  assert.deepEqual(
+    codexModels[0].supported_reasoning_levels.map((e) => e.effort),
+    ["low", "high"]
+  );
+
+  const agyOut = "\r⠋ Fetching...\r\ngemini-4-neon-high   Gemini 4 Neon (High)\r\ngemini-4-argon-low  Gemini 4 Argon (Low)\r\n";
+  const agyModels = parseAntigravityModelsOutput(agyOut);
+  assert.deepEqual(agyModels, [
+    { id: "gemini-4-neon-high", label: "Gemini 4 Neon (High)" },
+    { id: "gemini-4-argon-low", label: "Gemini 4 Argon (Low)" },
+  ]);
 });
 
 test("parseMarkdownBlocks parses headings, nested bullet lists, ordered lists, and code blocks", () => {

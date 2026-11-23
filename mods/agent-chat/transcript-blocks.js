@@ -1125,8 +1125,91 @@ export function computeFeedLayout(
   return { totalHeight, maxScroll, rowOffsets };
 }
 
+/**
+ * Parses `claude -p --input-format stream-json --output-format stream-json`
+ * initialize control_response stdout into discovered model entries.
+ * @param {string} stdout
+ * @returns {Array<{id: string, resolvedModel: string, label: string, note: string, supportsEffort: boolean, efforts: string[]}>}
+ */
+export function parseClaudeModelsResponse(stdout) {
+  for (const raw of String(stdout || "").split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || !line.startsWith("{")) continue;
+    try {
+      const parsed = JSON.parse(line);
+      const models = parsed?.response?.response?.models;
+      if (parsed?.type === "control_response" && Array.isArray(models)) {
+        return models
+          .filter((m) => m && typeof m.value === "string")
+          .map((m) => ({
+            id: m.value,
+            resolvedModel: m.resolvedModel || m.value,
+            label: m.displayName || m.value,
+            note: m.description || "",
+            supportsEffort: Boolean(m.supportsEffort),
+            efforts: Array.isArray(m.supportedEffortLevels)
+              ? m.supportedEffortLevels.map((e) => String(e).toLowerCase()).filter(Boolean)
+              : [],
+          }));
+      }
+    } catch (_e) {}
+  }
+  return [];
+}
 
+/**
+ * Parses `codex app-server` `model/list` JSON-RPC stdout into discovered model entries.
+ * @param {string} stdout
+ * @returns {Array<{slug: string, display_name: string, description: string, default_reasoning_level: string|null, supported_reasoning_levels: Array<{effort: string, description: string}>}>}
+ */
+export function parseCodexModelsResponse(stdout) {
+  for (const raw of String(stdout || "").split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || !line.startsWith("{")) continue;
+    try {
+      const parsed = JSON.parse(line);
+      const data = parsed?.result?.data;
+      if (parsed?.id === 2 && Array.isArray(data)) {
+        return data
+          .filter((m) => m && !m.hidden && (m.id || m.model))
+          .map((m) => ({
+            slug: m.id || m.model,
+            display_name: m.displayName || m.id || m.model,
+            description: m.description || "",
+            default_reasoning_level: m.defaultReasoningEffort
+              ? String(m.defaultReasoningEffort).toLowerCase()
+              : null,
+            supported_reasoning_levels: Array.isArray(m.supportedReasoningEfforts)
+              ? m.supportedReasoningEfforts
+                  .map((e) => ({
+                    effort: String(e?.reasoningEffort || "").toLowerCase(),
+                    description: e?.description || "",
+                  }))
+                  .filter((e) => e.effort)
+              : [],
+          }));
+      }
+    } catch (_e) {}
+  }
+  return [];
+}
 
+/**
+ * Parses `agy models` stdout into `{ id, label }` entries.
+ * @param {string} stdout
+ * @returns {Array<{id: string, label: string}>}
+ */
+export function parseAntigravityModelsOutput(stdout) {
+  const clean = String(stdout || "").replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "");
+  const parsed = [];
+  for (const raw of clean.split(/[\r\n]+/)) {
+    const m = raw.match(/^\s*([a-z0-9][a-z0-9._-]+)\s{2,}(.+?)\s*$/i);
+    if (m && m[1].toLowerCase() !== "id") {
+      parsed.push({ id: m[1].trim(), label: m[2].trim() });
+    }
+  }
+  return parsed;
+}
 
 const MD_LIST_ITEM = /^( *)([-*+]|\d{1,9}[.)])( +)(.*)$/;
 const MD_FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})\s*([^\s`]*)/;
