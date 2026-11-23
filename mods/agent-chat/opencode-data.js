@@ -204,20 +204,26 @@ export class OpenCodeItemCache {
  * @returns {string}
  */
 export function buildOpenCodePollQuery({
+  sessionId = null,
   title = "",
   cwd = null,
   since = 0,
   knownSessionId = null,
 } = {}) {
-  const where = [
-    "parent_id is null",
-    title ? `title = ${q(title)}` : null,
-    !title && cwd ? `directory = ${q(cwd)}` : null,
-  ]
-    .filter(Boolean)
-    .join(" and ");
-  const orderBy =
-    title && cwd ? `(directory = ${q(cwd)}) desc, time_updated desc` : "time_updated desc";
+  const where = sessionId
+    ? `id = ${q(sessionId)}`
+    : [
+        "parent_id is null",
+        title ? `title = ${q(title)}` : null,
+        !title && cwd ? `directory = ${q(cwd)}` : null,
+      ]
+        .filter(Boolean)
+        .join(" and ");
+  const orderBy = sessionId
+    ? "time_updated desc"
+    : title && cwd
+      ? `(directory = ${q(cwd)}) desc, time_updated desc`
+      : "time_updated desc";
   const sinceMs = Number.isFinite(Number(since)) ? Math.max(0, Math.floor(Number(since))) : 0;
   const messagesWhere = knownSessionId
     ? `session_id = (select id from s) and (time_updated >= ${sinceMs} or (select id from s) <> ${q(knownSessionId)})`

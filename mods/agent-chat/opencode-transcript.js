@@ -99,11 +99,17 @@ export class OpenCodeTranscript {
     const term = terminals().find((t) => t.address === this.terminal);
     const title = (agent?.title || "").replace(/^OC\s*\|\s*/, "").trim();
     const cwd = term?.cwd || null;
+    const sessionId =
+      (Array.isArray(term?.records) ? term.records : [])
+        .slice()
+        .reverse()
+        .map((r) => String(r || "").match(/\b(ses_[A-Za-z0-9]+)\b/)?.[1])
+        .find(Boolean) || null;
     this.itemsCache.rebuilds = 0;
 
     // One sqlite3 process resolves the session and returns its changed rows.
     const rows = await this.sql(
-      buildOpenCodePollQuery({ title, cwd, since: this.since, knownSessionId: before })
+      buildOpenCodePollQuery({ sessionId, title, cwd, since: this.since, knownSessionId: before })
     );
     if (!rows) return null;
     const sessionRow = rows.find((row) => row.kind === "session");
