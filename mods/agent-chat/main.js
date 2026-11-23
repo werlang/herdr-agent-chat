@@ -2892,13 +2892,38 @@ export default class AgentChat extends View {
           .gap(8)
           .items_center()
           .justify_between()
-          // Left: Folder & Git Branch
+          // Left: Agent switcher, Folder & Git Branch
           .child(
             h_flex()
               .flex_1()
               .min_w(0)
               .items_center()
               .gap(10)
+              .child(
+                h_flex()
+                  .id("agent-picker-trigger")
+                  .flex_none()
+                  .items_center()
+                  .gap(4)
+                  .px(6)
+                  .py(2)
+                  .rounded(6)
+                  .cursor_pointer()
+                  .hover((s) => s.bg(t.hover))
+                  .on_click((_e, cx) => {
+                    this.pickerOpen = !this.pickerOpen;
+                    this.modelMenuOpen = false;
+                    cx.notify();
+                  })
+                  .child(svg("mods/agent-chat/icons/terminal.svg").size(11.5).flex_none().text_color(t.dim))
+                  .child(
+                    div()
+                      .text_size(11.5)
+                      .text_color(t.foreground)
+                      .child(this.followFocused ? "Auto" : (this.terminal || "Agent"))
+                  )
+                  .child(svg("mods/agent-chat/icons/chevron-down.svg").size(10).flex_none().text_color(t.dim))
+              )
               .child(
                 h_flex()
                   .min_w(0)
