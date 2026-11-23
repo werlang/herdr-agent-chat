@@ -30,6 +30,9 @@ import {
   window,
   fonts,
   checking,
+  shared,
+  appHome,
+  readTextFile,
 } from "herdr";
 import {
   parseConversation,
@@ -46,6 +49,8 @@ import {
   terminalLocalAddress,
   groupAntigravityModels,
   parseAntigravityModel,
+  parseMarkdownBlocks,
+  resolveInternalFileLink,
 } from "./transcript-blocks.js";
 import { resolvePaneVisibility } from "./pane-visibility.js";
 import { demoBlocks } from "./demo-blocks.js";
@@ -490,6 +495,7 @@ export default class AgentChat extends View {
     this.modelsTerminal = null;
     this.modelsAt = 0;
     this.modelsLoading = false;
+    this.hasFileEditor = false;
 
     this.handle = cx.focus_handle();
 
@@ -1861,6 +1867,232 @@ export default class AgentChat extends View {
   }
 
   /**
+   * Opens external HTTP(S) URLs in the browser and internal file links/paths in `file-editor`.
+   * @param {string} url
+   * @param {any} cx
+   */
+  handleLinkClick(url, cx) {
+    if (!url || typeof url !== "string") return;
+    const trimmed = url.trim();
+    if (/^https?:\/\//i.test(trimmed)) {
+      cx.open_url(trimmed);
+      return;
+    }
+    if (!this.hasFileEditor) return;
+
+    const term = terminals().find((t) => t.address === this.terminal);
+    const activeSpace = spaces().find((s) => s.active);
+    const cwd = term?.cwd || activeSpace?.folder || "";
+    const resolved = resolveInternalFileLink(trimmed, cwd);
+    if (!resolved) return;
+
+    const on = terminalMachine(this.terminal) ?? activeSpace?.machine ?? null;
+    try {
+      const openTabs = shared("file-editor.openTabs") || {};
+      const fileKey = resolved.folder ? `${resolved.folder}/${resolved.file}` : resolved.file;
+      const existingTabId = openTabs[fileKey]?.tabId;
+      if (existingTabId && (activeSpace?.tabs || []).some((tab) => tab.id === existingTabId)) {
+        run("tab.select", { id: existingTabId });
+        return;
+      }
+
+      const tabProps = { folder: resolved.folder, file: resolved.file };
+      if (on) tabProps.on = on;
+      run("tab.new", { name: resolved.name, mod: "file-editor", props: tabProps });
+    } catch (_e) {}
+  }
+
+  /**
+   * Renders parsed Markdown blocks with real list indentation, headings, code blocks,
+   * blockquotes, and tables (since native TextView.markdown only renders inline runs).
+   */
+  renderMarkdownBlocks(blocks, t, monoFont, path, gap = 10, depth = 0) {
+    if (!blocks || blocks.length === 0) return div();
+    return v_flex()
+      .w_full()
+      .gap(gap)
+      .children(blocks.map((block, i) => this.renderMarkdownBlock(block, t, monoFont, `${path}.${i}`, depth)));
+  }
+
+  renderMarkdownBlock(block, t, monoFont, path, depth = 0) {
+    switch (block.type) {
+      case "heading": {
+        const sizes = { 1: 22, 2: 18, 3: 16, 4: 14.5, 5: 14, 6: 13.5 };
+        const sz = sizes[block.level] || 14;
+        return div()
+          .w_full()
+          .min_w(0)
+          .font_weight(600)
+          .text_size(sz)
+          .line_height(`${Math.round(sz * 1.35)}px`)
+          .text_color(block.level === 6 ? t.dim : t.foreground)
+          .when(block.level <= 2, (el) => el.border_b(1).border_color(withAlpha(t.border, "80")).pb(4))
+          .child(
+            TextView.markdown(path, block.text || "")
+              .selectable(true)
+              .on_link_click((url, cx) => this.handleLinkClick(url, cx))
+          );
+      }
+      case "paragraph": {
+        if (!block.text || !block.text.trim()) return div();
+        return div()
+          .w_full()
+          .min_w(0)
+          .text_size(14)
+          .line_height("22px")
+          .text_color(t.foreground)
+          .child(
+            TextView.markdown(path, block.text)
+              .selectable(true)
+              .on_link_click((url, cx) => this.handleLinkClick(url, cx))
+          );
+      }
+      case "code": {
+        const lines = (block.text || "").split("\n");
+        return v_flex()
+          .w_full()
+          .rounded(8)
+          .bg(t.raised)
+          .border_1()
+          .border_color(withAlpha(t.border, "70"))
+          .p(12)
+          .overflow_x_scroll()
+          .when(Boolean(block.lang), (el) =>
+            el.child(div().pb(4).font_family(monoFont).text_size(10.5).text_color(t.dim).child(block.lang))
+          )
+          .child(
+            v_flex()
+              .font_family(monoFont)
+              .text_size(12.5)
+              .line_height("19px")
+              .text_color(t.foreground)
+              .children(lines.map((line) => div().whitespace_nowrap().child(line === "" ? " " : line)))
+          );
+      }
+      case "image":
+        return this.renderImageRef({ alt: block.alt || "", src: block.src || "" }, t, monoFont);
+      case "hr":
+        return div().w_full().h(1).my(4).bg(withAlpha(t.border, "80"));
+      case "quote":
+        return h_flex()
+          .w_full()
+          .gap(12)
+          .child(div().w(3).h_full().flex_none().rounded(2).bg(t.dim))
+          .child(
+            div()
+              .flex_1()
+              .min_w(0)
+              .text_color(t.dim)
+              .child(this.renderMarkdownBlocks(block.blocks || [], t, monoFont, path, 8, depth))
+          );
+      case "list": {
+        const bullets = ["•", "◦", "▪"];
+        const bullet = bullets[depth % bullets.length];
+        return v_flex()
+          .w_full()
+          .gap(4)
+          .pl(8)
+          .children(
+            (block.items || []).map((item, i) => {
+              const marker =
+                item.checked !== null
+                  ? div()
+                      .w(14)
+                      .h(14)
+                      .mt(4)
+                      .flex_none()
+                      .rounded(3)
+                      .border_1()
+                      .border_color(item.checked ? t.accent : t.border)
+                      .when(item.checked, (el) =>
+                        el
+                          .bg(t.accent)
+                          .flex()
+                          .items_center()
+                          .justify_center()
+                          .child(div().text_size(10).text_color(t.background || "#fff").child("✓"))
+                      )
+                  : div()
+                      .w(block.ordered ? 22 : 12)
+                      .flex_none()
+                      .text_size(14)
+                      .line_height("22px")
+                      .text_color(t.dim)
+                      .child(block.ordered ? `${block.start + i}.` : bullet);
+              return h_flex()
+                .w_full()
+                .items_start()
+                .gap(6)
+                .child(marker)
+                .child(
+                  div()
+                    .flex_1()
+                    .min_w(0)
+                    .child(this.renderMarkdownBlocks(item.blocks || [], t, monoFont, `${path}.${i}`, 4, depth + 1))
+                );
+            })
+          );
+      }
+      case "table": {
+        const cols = Math.max(1, (block.header || []).length);
+        const renderTableRow = (cells, rowIdx, isHeader) =>
+          h_flex()
+            .w_full()
+            .when(isHeader, (el) => el.bg(t.raised))
+            .when(!isHeader && rowIdx > 1, (el) => el.border_t(1).border_color(t.border))
+            .children(
+              Array.from({ length: cols }, (_, c) => {
+                const align = block.align?.[c] || "left";
+                const content = cells[c] ?? "";
+                return div()
+                  .flex_1()
+                  .min_w(0)
+                  .px(10)
+                  .py(5)
+                  .when(c < cols - 1, (el) => el.border_r(1).border_color(t.border))
+                  .child(
+                    h_flex()
+                      .w_full()
+                      .when(align === "right", (el) => el.justify_end())
+                      .when(align === "center", (el) => el.justify_center())
+                      .child(
+                        div()
+                          .min_w(0)
+                          .text_size(13)
+                          .line_height("20px")
+                          .text_color(t.foreground)
+                          .when(isHeader, (el) => el.font_weight(600))
+                          .child(
+                            content.trim()
+                              ? TextView.markdown(`${path}.r${rowIdx}.c${c}`, content)
+                                  .selectable(true)
+                                  .on_link_click((url, cx) => this.handleLinkClick(url, cx))
+                              : ""
+                          )
+                      )
+                  );
+              })
+            );
+        return div()
+          .w_full()
+          .overflow_x_scroll()
+          .child(
+            v_flex()
+              .min_w(320)
+              .border_1()
+              .border_color(t.border)
+              .rounded(6)
+              .overflow_hidden()
+              .child(renderTableRow(block.header || [], 0, true))
+              .children((block.rows || []).map((cells, r) => renderTableRow(cells, r + 1, false)))
+          );
+      }
+      default:
+        return div();
+    }
+  }
+
+  /**
    * A Markdown image in a reply. The native Markdown view draws none, and the
    * host only loads images from the app's own folder, so the reference shows
    * as an attachment row: what it is, and where it lives.
@@ -1885,6 +2117,15 @@ export default class AgentChat extends View {
           .bg(t.raised)
           .border_1()
           .border_color(t.border)
+          .when(this.hasFileEditor, (el) =>
+            el
+              .cursor_pointer()
+              .hover((s) => s.bg(t.hover))
+              .on_click((_e, cx) => {
+                cx.stop_propagation();
+                this.handleLinkClick(img.src, cx);
+              })
+          )
           .child(svg("mods/agent-chat/icons/paperclip.svg").size(13).flex_none().text_color(t.dim))
           .child(
             div()

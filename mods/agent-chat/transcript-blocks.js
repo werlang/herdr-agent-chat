@@ -519,13 +519,15 @@ export function annotateRows(blocks, previous = null) {
         if (b.isLong) b.preview = lines.slice(0, 8).join("\n") + "\n…";
       }
     } else if (b.type === "assistant") {
-      if (old?.mdChunks && old.text === b.text) {
+      if (old?.mdChunks && old?.mdBlocks && old.text === b.text) {
         b.mdChunks = old.mdChunks;
+        b.mdBlocks = old.mdBlocks;
       } else {
         const owner = b.ekey || b.key || "a";
         b.mdChunks = splitMarkdownChunks(b.text || "").flatMap((text, i) =>
           splitImageLines(text, `md-${owner}-${i}-${contentHash(text)}`)
         );
+        b.mdBlocks = parseMarkdownBlocks(b.text || "");
       }
     } else if (b.type === "tool" && b.status === "running") {
       activeTool = b;
@@ -1010,4 +1012,248 @@ export function groupAntigravityModels(models) {
     }
   }
   return [...byFamily.values()];
+}
+
+
+
+
+
+
+const MD_LIST_ITEM = /^( *)([-*+]|\d{1,9}[.)])( +)(.*)$/;
+const MD_FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})\s*([^\s`]*)/;
+const MD_HEADING = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/;
+const MD_RULE = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
+const MD_QUOTE = /^ {0,3}>/;
+const MD_TABLE_DELIMITER = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+
+function mdIndentOf(line) {
+  let n = 0;
+  for (const ch of line) {
+    if (ch === " ") n++;
+    else if (ch === "\t") n += 4;
+    else break;
+  }
+  return n;
+}
+
+function mdSplitRow(line) {
+  let s = line.trim();
+  if (s.startsWith("|")) s = s.slice(1);
+  if (s.endsWith("|") && !s.endsWith("\\|")) s = s.slice(0, -1);
+  return s.split(/(?<!\\)\|/).map((cell) => cell.trim().replace(/\\\|/g, "|"));
+}
+
+function mdStartsBlock(line) {
+  return (
+    MD_FENCE_OPEN.test(line) ||
+    MD_HEADING.test(line) ||
+    MD_RULE.test(line) ||
+    MD_QUOTE.test(line) ||
+    IMAGE_LINE.test(line) ||
+    (MD_LIST_ITEM.test(line) && line.trim() !== "")
+  );
+}
+
+function parseMdLines(lines) {
+  const blocks = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (line.trim() === "") {
+      i++;
+      continue;
+    }
+
+    const fence = MD_FENCE_OPEN.exec(line);
+    if (fence) {
+      const marker = fence[1];
+      const closer = new RegExp(`^ {0,3}${marker[0] === "`" ? "`" : "~"}{${marker.length},}[ \\t]*$`);
+      const body = [];
+      i++;
+      while (i < lines.length && !closer.test(lines[i])) {
+        body.push(lines[i]);
+        i++;
+      }
+      i++;
+      blocks.push({ type: "code", lang: fence[2] || "", text: body.join("\n") });
+      continue;
+    }
+
+    const img = IMAGE_LINE.exec(line);
+    if (img) {
+      blocks.push({ type: "image", alt: img[1].trim(), src: img[2] });
+      i++;
+      continue;
+    }
+
+    const heading = MD_HEADING.exec(line);
+    if (heading) {
+      blocks.push({ type: "heading", level: heading[1].length, text: heading[2] || "" });
+      i++;
+      continue;
+    }
+
+    if (MD_RULE.test(line)) {
+      blocks.push({ type: "hr" });
+      i++;
+      continue;
+    }
+
+    if (MD_QUOTE.test(line)) {
+      const inner = [];
+      while (i < lines.length && MD_QUOTE.test(lines[i])) {
+        inner.push(lines[i].replace(/^ {0,3}> ?/, ""));
+        i++;
+      }
+      blocks.push({ type: "quote", blocks: parseMdLines(inner) });
+      continue;
+    }
+
+    if (line.includes("|") && i + 1 < lines.length && MD_TABLE_DELIMITER.test(lines[i + 1]) && lines[i + 1].includes("-")) {
+      const align = mdSplitRow(lines[i + 1]).map((cell) =>
+        cell.startsWith(":") && cell.endsWith(":") ? "center" : cell.endsWith(":") ? "right" : "left"
+      );
+      const header = mdSplitRow(line);
+      i += 2;
+      const rows = [];
+      while (i < lines.length && lines[i].trim() !== "" && lines[i].includes("|")) {
+        rows.push(mdSplitRow(lines[i]));
+        i++;
+      }
+      blocks.push({ type: "table", align, header, rows });
+      continue;
+    }
+
+    const item = MD_LIST_ITEM.exec(line);
+    if (item && mdIndentOf(line) < 4) {
+      const indent = mdIndentOf(line);
+      const ordered = /\d/.test(item[2][0]);
+      const list = { type: "list", ordered, start: ordered ? Number.parseInt(item[2], 10) : 1, items: [] };
+      while (i < lines.length) {
+        const m = MD_LIST_ITEM.exec(lines[i]);
+        if (!m || mdIndentOf(lines[i]) !== indent || /\d/.test(m[2][0]) !== ordered) break;
+        const contentIndent = m[1].length + m[2].length + m[3].length;
+        const body = [m[4]];
+        i++;
+        while (i < lines.length) {
+          const next = lines[i];
+          if (next.trim() === "") {
+            let j = i + 1;
+            while (j < lines.length && lines[j].trim() === "") j++;
+            if (j < lines.length && mdIndentOf(lines[j]) > indent) {
+              body.push("");
+              i++;
+              continue;
+            }
+            break;
+          }
+          if (mdIndentOf(next) <= indent) break;
+          body.push(next.slice(Math.min(mdIndentOf(next), contentIndent)));
+          i++;
+        }
+        const task = /^\[([ xX])\]\s+(.*)$/.exec(body[0]);
+        if (task) body[0] = task[2];
+        list.items.push({ checked: task ? task[1].toLowerCase() === "x" : null, blocks: parseMdLines(body) });
+      }
+      blocks.push(list);
+      continue;
+    }
+
+    const para = [line.trim()];
+    i++;
+    while (i < lines.length && lines[i].trim() !== "" && !mdStartsBlock(lines[i])) {
+      para.push(lines[i].trim());
+      i++;
+    }
+    blocks.push({ type: "paragraph", text: para.join(" ") });
+  }
+  return blocks;
+}
+
+/**
+ * Parses Markdown into structured blocks (headings, paragraphs, lists, code, quotes, tables, rules, images).
+ * @param {string} text
+ * @returns {Array<object>}
+ */
+export function parseMarkdownBlocks(text) {
+  const source = typeof text === "string" ? text : "";
+  if (!source.trim()) return [];
+  return parseMdLines(source.replace(/\r\n?/g, "\n").split("\n"));
+}
+
+
+/**
+ * Resolves an internal link or file path (`file:///...`, `/abs/path`, `rel/path#L10`)
+ * into `{ fullPath, folder, file, name, line }` for opening in `file-editor`.
+ * Returns `null` for external URLs (`http:`, `https:`, `mailto:`, etc.) or `#anchors`.
+ *
+ * @param {string} rawUrl
+ * @param {string} [cwd=""]
+ * @returns {{ fullPath: string, folder: string, file: string, name: string, line: number | null } | null}
+ */
+export function resolveInternalFileLink(rawUrl, cwd = "") {
+  if (typeof rawUrl !== "string") return null;
+  let target = rawUrl.trim();
+  if (!target || target.startsWith("#")) return null;
+
+  const schemeMatch = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(target);
+  if (schemeMatch) {
+    const scheme = schemeMatch[1].toLowerCase();
+    if (scheme !== "file") return null;
+    target = target.slice("file:".length);
+    if (target.startsWith("//localhost/")) target = target.slice("//localhost".length);
+    else if (target.startsWith("///")) target = target.slice(2);
+    else if (target.startsWith("//")) target = target.slice(1);
+    try {
+      target = decodeURIComponent(target);
+    } catch (_e) {}
+  }
+
+  let line = null;
+  const hashIdx = target.indexOf("#");
+  if (hashIdx >= 0) {
+    const frag = target.slice(hashIdx + 1);
+    const lineMatch = /^L?(\d+)(?:[-–—:]L?\d+)?$/i.exec(frag);
+    if (lineMatch) line = Number.parseInt(lineMatch[1], 10);
+    target = target.slice(0, hashIdx);
+  }
+  const colonLine = /^(.*?):(\d+)(?::\d+)?$/.exec(target);
+  if (colonLine && colonLine[1]) {
+    if (line === null) line = Number.parseInt(colonLine[2], 10);
+    target = colonLine[1];
+  }
+  if (!target) return null;
+
+  const baseCwd = String(cwd || "").replace(/\/+$/, "");
+  let combined = target;
+  if (!target.startsWith("/")) {
+    if (!baseCwd) return null;
+    combined = `${baseCwd}/${target}`;
+  }
+
+  const parts = [];
+  for (const seg of combined.split("/")) {
+    if (!seg || seg === ".") continue;
+    if (seg === "..") {
+      parts.pop();
+      continue;
+    }
+    parts.push(seg);
+  }
+  const fullPath = "/" + parts.join("/");
+  if (fullPath === "/") return null;
+
+  let folder;
+  let file;
+  if (baseCwd && fullPath.startsWith(`${baseCwd}/`)) {
+    folder = baseCwd;
+    file = fullPath.slice(baseCwd.length + 1);
+  } else {
+    const lastSlash = fullPath.lastIndexOf("/");
+    folder = lastSlash > 0 ? fullPath.slice(0, lastSlash) : "/";
+    file = fullPath.slice(lastSlash + 1);
+  }
+  if (!file) return null;
+  const name = file.split("/").pop() || file;
+  return { fullPath, folder, file, name, line };
 }

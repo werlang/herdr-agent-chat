@@ -20,6 +20,8 @@ const {
   terminalMachine,
   terminalLocalAddress,
   extractChangedFiles,
+  parseMarkdownBlocks,
+  resolveInternalFileLink,
 } = await import("../mods/agent-chat/transcript-blocks.js");
 const { buildOpenCodePollQuery, messageItems } = await import("../mods/agent-chat/opencode-data.js");
 const { parseConversation } = await import("../mods/agent-chat/parser.js");
@@ -193,4 +195,64 @@ test("parseConversation keeps Claude ● prose as assistant and Codex › as use
   assert.equal(blocks[0].text, "hello codex");
   assert.equal(blocks[1].text, "Here is the explanation in prose.");
   assert.equal(blocks[2].title, "Read(main.js)");
+});
+test("parseMarkdownBlocks parses headings, nested bullet lists, ordered lists, and code blocks", () => {
+  const md = [
+    "### 1. Section",
+    "- **Top item**: description",
+    "  - Nested item A",
+    "  - Nested item B",
+    "1. Ordered first",
+    "2. Ordered second",
+    "```js",
+    "const x = 1;",
+    "```",
+  ].join("\n");
+  const blocks = parseMarkdownBlocks(md);
+  assert.deepEqual(blocks.map((b) => b.type), ["heading", "list", "list", "code"]);
+  assert.equal(blocks[0].level, 3);
+  assert.equal(blocks[1].ordered, false);
+  assert.equal(blocks[1].items[0].blocks.length, 2);
+  assert.equal(blocks[1].items[0].blocks[1].type, "list");
+  assert.equal(blocks[1].items[0].blocks[1].items.length, 2);
+  assert.equal(blocks[2].ordered, true);
+  assert.equal(blocks[3].lang, "js");
+});
+
+test("resolveInternalFileLink resolves file:// URLs, absolute paths, and relative paths for file-editor", () => {
+  assert.equal(resolveInternalFileLink("https://github.com/pingdotgg/t3code"), null);
+  assert.equal(resolveInternalFileLink("#section"), null);
+
+  assert.deepEqual(
+    resolveInternalFileLink("file:///Users/pablowerlang/ws/herdr-agent-chat/mods/agent-chat/main.js#L12-L20", "/Users/pablowerlang/ws/herdr-agent-chat"),
+    {
+      fullPath: "/Users/pablowerlang/ws/herdr-agent-chat/mods/agent-chat/main.js",
+      folder: "/Users/pablowerlang/ws/herdr-agent-chat",
+      file: "mods/agent-chat/main.js",
+      name: "main.js",
+      line: 12,
+    }
+  );
+
+  assert.deepEqual(
+    resolveInternalFileLink("./src/../mods/file%20name.js:42", "/repo"),
+    {
+      fullPath: "/repo/mods/file%20name.js",
+      folder: "/repo",
+      file: "mods/file%20name.js",
+      name: "file%20name.js",
+      line: 42,
+    }
+  );
+
+  assert.deepEqual(
+    resolveInternalFileLink("file:///tmp/my%20file.md", "/repo"),
+    {
+      fullPath: "/tmp/my file.md",
+      folder: "/tmp",
+      file: "my file.md",
+      name: "my file.md",
+      line: null,
+    }
+  );
 });
