@@ -821,13 +821,173 @@ export function itemsToBlocks(items, agentWorking) {
  * @param {string} raw
  * @returns {{model?: string, effort?: string}|null}
  */
+/**
+ * Parses model/effort/compaction notices from Claude `<local-command-stdout>` blocks.
+ * @param {string} raw
+ * @returns {{ model?: string, effort?: string, notice?: string } | null}
+ */
 export function settingChange(raw) {
   if (typeof raw !== "string") return null;
-  const out = raw.match(/<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/)?.[1];
+  const out = raw.match(/<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/)?.[1]?.trim();
   if (!out) return null;
-  const model = out.match(/^Set model to\s+`?([^`]+?)`?(?:\s+\(default\))?(?:\s+and\b|\s*$)/);
-  if (model) return { model: model[1].trim() };
-  const effort = out.match(/^Set effort level to\s+(\w+)/);
+  const model = out.match(/^(?:Set model to|Model set to)\s+`?([^`\n]+?)`?(?:\s+and\b|\s*$)/i);
+  if (model) {
+    const clean = model[1].replace(/\s*\(default\)\s*$/i, "").trim();
+    return clean ? { model: clean } : null;
+  }
+  const effort = out.match(/^(?:Set effort level to|Effort set to)\s+(\w+)/i);
   if (effort) return { effort: effort[1].toLowerCase() };
   return null;
+}
+
+/**
+ * Extracts the remote machine prefix from a terminal address like `rpi5/t16r`, or null if local.
+ * @param {string} address
+ * @returns {string|null}
+ */
+export function terminalMachine(address) {
+  if (typeof address !== "string") return null;
+  const i = address.indexOf("/");
+  return i > 0 ? address.slice(0, i) : null;
+}
+
+/**
+ * Extracts the local terminal ID from an address (`rpi5/t16r` -> `t16r`, `t16r` -> `t16r`).
+ * @param {string} address
+ * @returns {string}
+ */
+export function terminalLocalAddress(address) {
+  if (typeof address !== "string") return "";
+  const i = address.indexOf("/");
+  return i > 0 ? address.slice(i + 1) : address;
+}
+
+const HARNESS_TAG_NAMES = [
+  "system-reminder",
+  "local-command-caveat",
+  "local-command-stdout",
+  "local-command-stderr",
+  "task-notification",
+  "ADDITIONAL_METADATA",
+  "USER_SETTINGS_CHANGE",
+  "EXTREMELY_IMPORTANT",
+  "user_info",
+  "context",
+];
+
+const HARNESS_TAG_RE = new RegExp(
+  `<(${HARNESS_TAG_NAMES.join("|")})\\b[^>]*>[\\s\\S]*?<\\/\\1>`,
+  "gi"
+);
+
+/**
+ * Removes injected harness XML blocks from user text while preserving actual user content.
+ * @param {string} raw
+ * @returns {string}
+ */
+export function stripHarnessXml(raw) {
+  if (typeof raw !== "string") return "";
+  let text = raw.replace(HARNESS_TAG_RE, "");
+  const userReq = text.match(/<USER_REQUEST>\s*([\s\S]*?)\s*<\/USER_REQUEST>/i);
+  if (userReq) text = userReq[1];
+  return text.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/**
+ * Reads the model name from Claude Code's startup banner or status line.
+ * @param {string} rawText
+ * @returns {string}
+ */
+export function claudeScreenModel(rawText) {
+  if (!rawText) return "";
+  const lines = String(rawText).replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").split("\n");
+  for (const line of lines) {
+    // Banner: "Opus 5.5 · Claude Max" or "Sonnet 4.6 · ..."
+    const banner = line.match(/^\s*([A-Z][A-Za-z0-9 ._-]{1,36}?)\s+·\s+Claude\b/);
+    if (banner) return banner[1].trim();
+    // Status bar: "Opus 5.5 (1M context)" or "Claude Opus 5.5"
+    const ctx = line.match(/^\s*(?:Claude\s+)?((?:Opus|Sonnet|Haiku|Fable)\s+[0-9.]+)\s*(?:\(|·|$)/);
+    if (ctx) return ctx[1].trim();
+  }
+  return "";
+}
+
+/**
+ * Reads the active model (and optional effort) from a terminal screen capture when no transcript exists yet.
+ * @param {string} rawText
+ * @param {string} [app]
+ * @returns {string}
+ */
+export function screenModel(rawText, app = "") {
+  if (!rawText) return "";
+  const clean = String(rawText).replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
+  if (app === "claude") return claudeScreenModel(clean);
+  const lines = clean.split("\n");
+  if (app === "codex") {
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const m = lines[i].match(/^\s*([a-z0-9][a-z0-9._-]+(?:\s+(?:low|medium|high|xhigh|extra high|max|ultra))?)\s+·\s+(?:\d+%\s+left|\/)/i);
+      if (m) return m[1].trim();
+    }
+    return "";
+  }
+  if (app === "antigravity") {
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const m = lines[i].match(/\b((?:gemini|claude|gpt|orchestrator)[a-z0-9._ -]{2,40})\s*(?:\||·|$)/i);
+      if (m) return m[1].trim();
+    }
+    return "";
+  }
+  // OpenCode TUI footer: "┃  Claude Sonnet 4.5  Anthropic  ·  high" or "Build  Claude ...  Anthropic"
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    const oc = line.match(/(?:Build|Plan|Chat)\s+([A-Z][A-Za-z0-9 ._-]{2,40}?)\s{2,}([A-Z][A-Za-z0-9 ._-]+)/);
+    if (oc) return oc[1].trim();
+  }
+  return claudeScreenModel(clean);
+}
+
+const AGY_EFFORT_SUFFIX_RE = /-(low|medium|high|xhigh)$/i;
+
+/**
+ * Splits an Antigravity model ID into its base family ID and effort level (if encoded as a suffix).
+ * @param {string} id
+ * @returns {{ familyId: string, effort: string }}
+ */
+export function parseAntigravityModel(id) {
+  const raw = String(id || "").trim();
+  const m = raw.match(AGY_EFFORT_SUFFIX_RE);
+  if (!m) return { familyId: raw, effort: "" };
+  return { familyId: raw.slice(0, -m[0].length), effort: m[1].toLowerCase() };
+}
+
+/**
+ * Groups flat Antigravity model entries (e.g. `gemini-4-neon-low`, `gemini-4-neon-high`)
+ * into selectable model families with their supported effort levels.
+ * @param {Array<{ id: string, label?: string, name?: string }>} models
+ * @returns {Array<{ id: string, label: string, efforts: string[], variants: Record<string, string> }>}
+ */
+export function groupAntigravityModels(models) {
+  const byFamily = new Map();
+  for (const item of models || []) {
+    const id = String(item?.id || "").trim();
+    if (!id) continue;
+    const { familyId, effort } = parseAntigravityModel(id);
+    const rawLabel = String(item?.label || item?.name || id).trim();
+    const baseLabel = effort
+      ? rawLabel.replace(new RegExp(`\\s*\\(?${effort}\\)?\\s*$`, "i"), "").trim()
+      : rawLabel;
+    let entry = byFamily.get(familyId);
+    if (!entry) {
+      entry = { id: familyId, label: baseLabel || familyId, efforts: [], variants: {} };
+      byFamily.set(familyId, entry);
+    }
+    if (effort) {
+      if (!entry.efforts.includes(effort)) entry.efforts.push(effort);
+      entry.variants[effort] = id;
+    } else {
+      entry.variants.default = id;
+    }
+  }
+  return [...byFamily.values()];
 }
