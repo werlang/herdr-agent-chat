@@ -246,6 +246,10 @@ export class ClaudeTranscript {
 
     // Messages typed while the agent was busy are stored as queued commands.
     const att = entry.type === "attachment" ? entry.attachment : null;
+    if (att?.type === "model" && typeof att.model === "string") {
+      this.model = att.model;
+      return;
+    }
     if (att?.type === "queued_command" && att.origin?.kind === "human") {
       const images = Array.isArray(att.prompt) ? att.prompt.filter((p) => p?.type === "image").length : 0;
       let text = claudeUserText(typeof att.prompt === "string" ? att.prompt : textOf(att.prompt)) || "";

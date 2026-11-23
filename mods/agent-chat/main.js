@@ -99,7 +99,8 @@ const EFFORTS = [
   { id: "low", label: "Low", note: "Quickest, for simple tasks", bars: 1 },
   { id: "medium", label: "Medium", note: "Balanced speed and depth", bars: 2 },
   { id: "high", label: "High", note: "Thinks longer on hard problems", bars: 3 },
-  { id: "max", label: "Max", note: "Most thorough, slowest", bars: 3 },
+  { id: "xhigh", label: "xHigh", note: "Deeper than high", bars: 4 },
+  { id: "max", label: "Max", note: "Most thorough, slowest", bars: 5 },
 ];
 
 /**
@@ -108,8 +109,11 @@ const EFFORTS = [
  * @returns {string|null}
  */
 function effortLabel(id) {
-  if (id === "xhigh") return "xHigh";
-  return EFFORTS.find((e) => e.id === id)?.label || (id ? id[0].toUpperCase() + id.slice(1) : null);
+  if (!id) return null;
+  const low = String(id).toLowerCase();
+  if (low === "xhigh") return "xHigh";
+  if (low === "ultra") return "Ultra";
+  return EFFORTS.find((e) => e.id === low)?.label || low[0].toUpperCase() + low.slice(1);
 }
 
 /** "Opus 5.5" for "claude-opus-5-5" (and dated or suffixed variants of it). */
@@ -157,7 +161,7 @@ function agentDisplayName(agent, terminal) {
  */
 function renderEffortGlyph(effortId, t, highlightMax = false) {
   const id = (effortId || "").toLowerCase();
-  const count = { minimal: 1, low: 1, medium: 2, high: 3, xhigh: 4, max: 5 }[id] || 0;
+  const count = { minimal: 1, low: 1, medium: 2, high: 3, xhigh: 4, max: 5, ultra: 5 }[id] || 0;
 
   const heights = [3, 5, 7, 9, 11];
   return h_flex()
@@ -238,10 +242,13 @@ function screenModel(text) {
   const lines = (text || "").split("\n").slice(-20).reverse();
   for (const raw of lines) {
     const line = raw.replace(/[│┃▏▕█▌▐|]/g, " ").trim();
+    // Codex footer: "gpt-5.4 high · 100% left · ~/path"
+    const codex = line.match(/^([a-z0-9][a-z0-9._-]+)(?:\s+(low|medium|high|xhigh|max|ultra))?\s+·\s+\d+%\s+left\b/i);
+    if (codex) return { model: codex[1].trim(), effort: codex[2]?.toLowerCase() || null };
     // The mode may carry a word ("Build auto · …") or stand alone ("Build · …").
     const mode = line.match(/(?:^|\s)(?:Build|Plan)(?:\s+[^\s·]+)?\s+·\s+(.+?)(?:\s+·\s+(\S+))?$/);
     if (mode) return { model: mode[1].trim(), effort: mode[2] || null };
-    const tail = line.match(/\s{2,}(\S.*?)\s+·\s+(minimal|low|medium|high|xhigh|max)$/);
+    const tail = line.match(/\s{2,}(\S.*?)\s+·\s+(minimal|low|medium|high|xhigh|max|ultra)$/);
     if (tail) return { model: tail[1].trim(), effort: tail[2] };
   }
   return null;
@@ -477,6 +484,9 @@ export default class AgentChat extends View {
     this._verifiedPaths = false;
     this.models = []; // OpenCode's catalogue: { id, modelID, providerID, name }
     this.providers = {}; // providerID → display name
+    this.codexModels = [];
+    this.agyModels = [];
+    this.modelsTerminal = null;
     this.modelsAt = 0;
     this.modelsLoading = false;
 
@@ -731,9 +741,8 @@ export default class AgentChat extends View {
     if (gen !== undefined && gen !== this._generation) return true;
     if (!result) return false;
 
-    // Claude Code names its model only in replies; until the first one, the
-    // welcome banner on screen is the only place it shows. Read it slowly.
-    if (this.transcript instanceof ClaudeTranscript && !this.transcript.model) {
+    // Until a transcript names its model, read the terminal screen slowly.
+    if (!this.transcript.model) {
       const now = Date.now();
       if (!this._screenAt || now - this._screenAt > 3000) {
         this._screenAt = now;
@@ -2105,8 +2114,9 @@ export default class AgentChat extends View {
   /** `{ model, effort }` display names; either may be null when it cannot be told. */
   currentModelInfo() {
     const agent = findAgent(this.terminal);
+    const app = agentApp(agent);
     if (this.transcript?.terminal === this.terminal) {
-      if (this.transcript instanceof ClaudeTranscript && agentApp(agent) === "claude-code") {
+      if (this.transcript instanceof ClaudeTranscript && app === "claude-code") {
         // Before the first reply there is no model on record: read the banner.
         const seen = claudeScreenModel(this.rawText);
         return {
@@ -2114,7 +2124,7 @@ export default class AgentChat extends View {
           effort: effortLabel(this.transcript.effort || seen?.effort),
         };
       }
-      if (this.transcript instanceof OpenCodeTranscript && agentApp(agent) === "opencode") {
+      if (this.transcript instanceof OpenCodeTranscript && app === "opencode") {
         const known = this.models.find(
           (m) =>
             m.modelID === this.transcript.model &&
@@ -2123,6 +2133,22 @@ export default class AgentChat extends View {
         const name = known?.name || this.transcript.modelLabel;
         // A session with no messages yet has no model on record: read the TUI.
         if (name) return { model: name, effort: effortLabel(this.transcript.effort) };
+      }
+      if (this.transcript instanceof CodexTranscript && app === "codex" && this.transcript.model) {
+        const known = this.codexModels.find((m) => m.slug === this.transcript.model);
+        return {
+          model: known?.display_name || this.transcript.model,
+          effort: effortLabel(this.transcript.effort || known?.default_reasoning_level),
+        };
+      }
+      if (this.transcript instanceof AntigravityTranscript && (app === "antigravity" || app === "agy") && this.transcript.model) {
+        const parsed = parseAntigravityModel(this.transcript.model);
+        const families = groupAntigravityModels(this.agyModels.length ? this.agyModels : ANTIGRAVITY_MODELS);
+        const fam = families.find((f) => f.id === parsed.familyId || f.id === this.transcript.model);
+        return {
+          model: fam?.label || prettyModel(parsed.familyId) || this.transcript.model,
+          effort: effortLabel(this.transcript.effort || parsed.effort),
+        };
       }
     }
     const seen = screenModel(this.rawText);
@@ -2150,7 +2176,7 @@ export default class AgentChat extends View {
     }
     cx.spawn(async (cx) => {
       try {
-        await hcOrThrow(["send", this.terminal, command]);
+        await this.sendTextToTerminal(command);
         await this.update(cx);
       } catch (err) {
         this.flashNotice(err, cx);
@@ -2159,26 +2185,108 @@ export default class AgentChat extends View {
     });
   }
 
-  /** Loads OpenCode's model catalogue and provider names. */
+  /**
+   * Drives Codex CLI's interactive `/model` picker on the terminal screen.
+   * @param {string} slug
+   * @param {string|null} effort
+   * @param {any} cx
+   */
+  switchCodexModel(slug, effort, cx) {
+    this.modelMenuOpen = false;
+    cx.notify();
+    if (!this.terminal || !slug) return;
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    cx.spawn(async (cx) => {
+      try {
+        await this.sendTextToTerminal("/model");
+        await wait(350);
+        const menuRes = await hc(["read", this.terminal, "--lines", "40", "--json"]);
+        const menuText = menuRes.code === 0 ? JSON.parse(menuRes.stdout)?.text || "" : "";
+        let picked = null;
+        for (const raw of menuText.split("\n")) {
+          const m = raw.match(/^\s*(?:›\s*)?(\d+)\.\s+([^\s(]+)/);
+          if (m && m[2].toLowerCase() === slug.toLowerCase()) {
+            picked = m[1];
+            break;
+          }
+        }
+        if (!picked) {
+          await hcOrThrow(["keys", this.terminal, "escape"]);
+          throw new Error(`Model ${slug} not found in Codex /model menu`);
+        }
+        await hcOrThrow(["keys", this.terminal, picked]);
+        await wait(350);
+        const effRes = await hc(["read", this.terminal, "--lines", "30", "--json"]);
+        const effText = effRes.code === 0 ? JSON.parse(effRes.stdout)?.text || "" : "";
+        if (/Select Reasoning Level/i.test(effText)) {
+          const targetEffort = (effort || "medium").toLowerCase();
+          if (targetEffort === "max" || targetEffort === "ultra") {
+            await hcOrThrow(["keys", this.terminal, "5"]);
+            await wait(250);
+            await hcOrThrow(["keys", this.terminal, targetEffort === "max" ? "1" : "2"]);
+          } else {
+            const idx = { low: "1", medium: "2", high: "3", xhigh: "4" }[targetEffort] || "2";
+            await hcOrThrow(["keys", this.terminal, idx]);
+          }
+        }
+        await this.update(cx);
+      } catch (err) {
+        this.flashNotice(err, cx);
+      }
+      cx.notify();
+    });
+  }
+
+  /** Loads the active agent's model catalogue (OpenCode API, Codex cache, or `agy models`). */
   refreshModels(cx, force = false) {
+    if (this.modelsTerminal !== this.terminal) {
+      this.modelsTerminal = this.terminal;
+      this.modelsAt = 0;
+    }
     if (this.modelsLoading) return;
     if (!force && this.modelsAt && Date.now() - this.modelsAt < 60_000) return;
+    const app = agentApp(findAgent(this.terminal));
+    if (app === "claude-code") return;
     this.modelsLoading = true;
     cx.notify();
     const on = terminalMachine(this.terminal) ?? spaces().find((s) => s.active)?.machine ?? null;
     cx.spawn(async (cx) => {
       try {
-        const [catalogue, providerList] = await Promise.all([
-          exec("opencode", ["api", "GET", "/api/model"], { on }),
-          exec("opencode", ["api", "GET", "/api/provider"], { on }),
-        ]);
-        if (catalogue.code === 0) {
-          const data = JSON.parse(catalogue.stdout)?.data ?? [];
-          this.models = data.filter((m) => !m.type || m.type === "chat");
-        }
-        if (providerList.code === 0) {
-          const data = JSON.parse(providerList.stdout)?.data ?? [];
-          this.providers = Object.fromEntries(data.map((p) => [p.id, p.name || p.id]));
+        if (app === "opencode") {
+          const [catalogue, providerList] = await Promise.all([
+            exec("opencode", ["api", "GET", "/api/model"], { on }),
+            exec("opencode", ["api", "GET", "/api/provider"], { on }),
+          ]);
+          if (catalogue.code === 0) {
+            const data = JSON.parse(catalogue.stdout)?.data ?? [];
+            this.models = data.filter((m) => !m.type || m.type === "chat");
+          }
+          if (providerList.code === 0) {
+            const data = JSON.parse(providerList.stdout)?.data ?? [];
+            this.providers = Object.fromEntries(data.map((p) => [p.id, p.name || p.id]));
+          }
+        } else if (app === "codex") {
+          const res = await exec(
+            "python3",
+            ["-c", "import os; print(open(os.path.expanduser('~/.codex/models_cache.json')).read())"],
+            { on }
+          );
+          if (res.code === 0 && res.stdout.trim()) {
+            const parsed = JSON.parse(res.stdout);
+            this.codexModels = Array.isArray(parsed?.models)
+              ? parsed.models.filter((m) => m.visibility !== "hide")
+              : [];
+          }
+        } else if (app === "antigravity" || app === "agy") {
+          const res = await exec("agy", ["models"], { on });
+          if (res.code === 0 && res.stdout.trim()) {
+            const parsed = [];
+            for (const line of res.stdout.split("\n")) {
+              const m = line.match(/^\s*([a-z0-9][a-z0-9._-]+)\s{2,}(.+?)\s*$/i);
+              if (m && m[1].toLowerCase() !== "id") parsed.push({ id: m[1].trim(), label: m[2].trim() });
+            }
+            if (parsed.length > 0) this.agyModels = parsed;
+          }
         }
       } catch (_err) {
         // Keep the last good catalogue
@@ -2254,6 +2362,7 @@ export default class AgentChat extends View {
     const app = agentApp(agent);
     const isClaude = app === "claude-code";
     const isOpenCode = app === "opencode";
+    const isCodex = app === "codex";
     const isAntigravity = app === "antigravity" || app === "agy";
 
     const currentModelInfo = this.currentModelInfo();
@@ -2286,6 +2395,33 @@ export default class AgentChat extends View {
         )
         .when(selected, (el) => el.child(svg("mods/agent-chat/icons/check.svg").size(13).text_color(t.accent)));
 
+    const agyFamilies = isAntigravity
+      ? groupAntigravityModels(this.agyModels.length ? this.agyModels : ANTIGRAVITY_MODELS)
+      : [];
+    const currentAgyId =
+      this.transcript instanceof AntigravityTranscript && this.transcript.terminal === this.terminal
+        ? this.transcript.model
+        : null;
+    const currentAgyParsed = currentAgyId ? parseAntigravityModel(currentAgyId) : null;
+    const currentAgyFamily = isAntigravity
+      ? agyFamilies.find(
+          (f) =>
+            (currentAgyParsed && f.id === currentAgyParsed.familyId) ||
+            f.id === currentAgyId ||
+            (currentModelName && f.label === currentModelName)
+        ) || agyFamilies[0] || null
+      : null;
+
+    const currentCodexSlug =
+      this.transcript instanceof CodexTranscript && this.transcript.terminal === this.terminal
+        ? this.transcript.model
+        : this.codexModels.find((m) => m.display_name === currentModelName || m.slug === currentModelName)?.slug ||
+          this.codexModels[0]?.slug ||
+          null;
+    const currentCodexModel = isCodex
+      ? this.codexModels.find((m) => m.slug === currentCodexSlug) || null
+      : null;
+
     /** @type {any[]} */
     let modelRows = [];
     if (isClaude) {
@@ -2310,14 +2446,13 @@ export default class AgentChat extends View {
         groups.get(m.providerID).push(m);
       }
       const providerName = (id) => this.providers[id] || id;
-      // The current model's provider leads, so the checked row is on screen
-      // when the menu opens; the rest follow alphabetically.
       const currentProvider = this.currentOpenCodeModel()?.providerID;
       const order = [...groups.keys()].sort((a, b) => {
         if (a === currentProvider) return -1;
         if (b === currentProvider) return 1;
         return providerName(a).localeCompare(providerName(b));
       });
+      const ocCurrent = this.currentOpenCodeModel();
       for (const provider of order) {
         modelRows.push(
           div().px(10).pt(6).pb(2).text_size(10.5).font_semibold().text_color(t.dim).child(providerName(provider))
@@ -2327,48 +2462,67 @@ export default class AgentChat extends View {
           .slice()
           .sort((a, b) => (a.name || a.modelID).localeCompare(b.name || b.modelID));
         for (const m of entries) {
+          const isCurrent = ocCurrent
+            ? ocCurrent.providerID === m.providerID && ocCurrent.modelID === m.modelID
+            : Boolean(currentModelName && (currentModelName === m.name || currentModelName === m.modelID));
           modelRows.push(
             row(
               `model-${provider}-${m.modelID}`,
               m.name || prettyModel(m.modelID) || m.modelID,
               "",
-              Boolean(currentModelName && (currentModelName === m.name || currentModelName === m.modelID)),
+              isCurrent,
               (_e, cx) => this.switchOpenCodeModel(m, cx)
             )
           );
         }
       }
-    } else if (isAntigravity) {
-      modelRows = ANTIGRAVITY_MODELS.map((m) =>
+    } else if (isCodex && this.codexModels.length > 0) {
+      modelRows = this.codexModels.map((m) =>
         row(
-          `model-${m.id}`,
-          m.label,
-          m.note,
-          Boolean(currentModelName && (currentModelName === m.label || currentModelName.includes(m.id))),
-          (_e, cx) => this.chooseModel(`/model ${m.id}`, cx)
+          `model-${m.slug}`,
+          m.display_name || m.slug,
+          m.description || "",
+          m.slug === currentCodexSlug,
+          (_e, cx) => this.switchCodexModel(m.slug, currentEffort?.toLowerCase() || m.default_reasoning_level || "medium", cx)
         )
       );
+    } else if (isCodex) {
+      modelRows = [
+        row("model-open-native", "Open Codex /model selector", "Loading Codex models…", false, (_e, cx) =>
+          this.chooseModel("/model", cx)
+        ),
+      ];
+    } else if (isAntigravity) {
+      modelRows = agyFamilies.map((fam) => {
+        const curEff = (currentEffort || currentAgyParsed?.effort || "medium").toLowerCase();
+        const targetId = fam.variants[curEff] || fam.variants.medium || fam.variants.default || Object.values(fam.variants)[0] || fam.id;
+        return row(
+          `model-${fam.id}`,
+          fam.label,
+          "",
+          Boolean(currentAgyFamily && currentAgyFamily.id === fam.id),
+          (_e, cx) => this.chooseModel(`/model ${targetId}`, cx)
+        );
+      });
     } else {
       modelRows = [
-        ...ANTIGRAVITY_MODELS.map((m) =>
-          row(
-            `model-${m.id}`,
-            m.label,
-            m.note,
-            Boolean(currentModelName && (currentModelName === m.label || currentModelName.includes(m.id))),
-            (_e, cx) => this.chooseModel(`/model ${m.id}`, cx)
-          )
-        ),
         row("model-open-native", "Open native model selector", `Run /models in ${agentName}`, false, (_e, cx) =>
           this.chooseModel("/models", cx)
         ),
       ];
     }
 
-    // OpenCode has no `/effort` command (typing one just sends a message):
-    // effort is the model's `variant`, switched through the session API, and
-    // each model lists its own variants.
     const ocModel = isOpenCode ? this.currentOpenCodeModel() : null;
+    const codexEfforts = isCodex
+      ? (currentCodexModel?.supported_reasoning_levels || [])
+          .map((l) => l?.effort)
+          .filter(Boolean)
+          .map((id) => ({ id, label: effortLabel(id), note: null }))
+      : [];
+    const agyEfforts = isAntigravity && currentAgyFamily?.efforts?.length
+      ? currentAgyFamily.efforts.map((id) => ({ id, label: effortLabel(id), note: null }))
+      : [];
+
     const effortOptions = isOpenCode
       ? ocModel?.variants?.length
         ? [
@@ -2378,10 +2532,18 @@ export default class AgentChat extends View {
         : []
       : isClaude
       ? CLAUDE_EFFORTS
+      : isCodex
+      ? codexEfforts
+      : isAntigravity
+      ? agyEfforts
       : EFFORTS;
     const pickEffort = (id, cx) => {
       if (isOpenCode) {
         if (ocModel) this.switchOpenCodeModel(ocModel, cx, id === "default" ? null : id);
+      } else if (isCodex) {
+        if (currentCodexSlug) this.switchCodexModel(currentCodexSlug, id, cx);
+      } else if (isAntigravity && currentAgyFamily?.variants?.[id]) {
+        this.chooseModel(`/model ${currentAgyFamily.variants[id]}`, cx);
       } else {
         this.chooseModel(`/effort ${id}`, cx);
       }
