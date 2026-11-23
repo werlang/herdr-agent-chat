@@ -306,6 +306,15 @@ export class ClaudeTranscript {
     const content = entry.message?.content;
     const originKind = entry.origin?.kind || entry.turnOrigin?.kind || "";
 
+    if (entry.type === "system") {
+      if (entry.subtype === "api_error" || entry.level === "warning" || entry.level === "error") {
+        const msg = entry.error?.message || entry.message || entry.content || "System notice";
+        const tone = entry.level === "warning" ? "warning" : "error";
+        this.items.push({ type: "notice", tone, text: clip(String(msg).trim()) });
+      }
+      return;
+    }
+
     if (entry.type === "user") {
       if (entry.isCompactSummary) {
         this.items.push({ type: "notice", tone: "info", text: "Conversation compacted" });
@@ -327,7 +336,17 @@ export class ClaudeTranscript {
         }
         return;
       }
-      const change = settingChange(typeof content === "string" ? content : textOf(content));
+      const rawStr = typeof content === "string" ? content : textOf(content);
+      const stderrMatch = rawStr.match(/<local-command-stderr>([\s\S]*?)<\/local-command-stderr>/i);
+      if (stderrMatch && stderrMatch[1]?.trim()) {
+        this.items.push({ type: "notice", tone: "warning", text: clip(stderrMatch[1].trim()) });
+        return;
+      }
+      if (rawStr.startsWith("[Request interrupted")) {
+        this.items.push({ type: "notice", tone: "info", text: "Interrupted" });
+        return;
+      }
+      const change = settingChange(rawStr);
       if (change) {
         if (change.model) {
           this.model = change.model;

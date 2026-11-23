@@ -226,6 +226,41 @@ test("OpenCode query isolates new sessions via minCreatedMs when title and sessi
   assert.match(sql, /directory = '\/repo'/);
 });
 
+test("harness warning and error notices are ingested by Claude, Codex, and Antigravity readers", () => {
+  const claude = new ClaudeTranscript("t1");
+  claude.ingest({ type: "system", subtype: "api_error", level: "warning", message: "5h limit warning" });
+  claude.ingest({ type: "user", message: { content: "<local-command-stderr>Unknown flag</local-command-stderr>" } });
+  assert.deepEqual(
+    claude.items.map((i) => ({ type: i.type, tone: i.tone, text: i.text })),
+    [
+      { type: "notice", tone: "warning", text: "5h limit warning" },
+      { type: "notice", tone: "warning", text: "Unknown flag" },
+    ]
+  );
+
+  const codexState = { items: [], tools: new Map(), model: null, effort: null, sessionId: null };
+  ingestCodexEntry(codexState, { type: "event_msg", payload: { type: "warning", message: "Approaching quota" } });
+  ingestCodexEntry(codexState, { type: "event_msg", payload: { type: "error", message: "Request failed" } });
+  assert.deepEqual(
+    codexState.items.map((i) => ({ type: i.type, tone: i.tone, text: i.text })),
+    [
+      { type: "notice", tone: "warning", text: "Approaching quota" },
+      { type: "notice", tone: "error", text: "Request failed" },
+    ]
+  );
+
+  const agyState = { items: [], tools: new Map(), lastTool: null, model: null, effort: null };
+  ingestAntigravityEntry(agyState, { type: "WARNING_MESSAGE", content: "Tool timeout" });
+  ingestAntigravityEntry(agyState, { type: "ERROR_MESSAGE", error: "Upstream 503" });
+  assert.deepEqual(
+    agyState.items.map((i) => ({ type: i.type, tone: i.tone, text: i.text })),
+    [
+      { type: "notice", tone: "warning", text: "Tool timeout" },
+      { type: "notice", tone: "error", text: "Upstream 503" },
+    ]
+  );
+});
+
 test("harness discovery parsers extract models and capabilities from CLI outputs", () => {
   const claudeOut = [
     '{"type":"system","subtype":"hook_started"}',

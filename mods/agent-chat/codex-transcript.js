@@ -79,6 +79,18 @@ export function ingestCodexEntry(state, entry) {
     return;
   }
 
+  if (payload.type === "warning") {
+    const msg = String(payload.message || payload.text || "Warning").trim();
+    if (msg) state.items.push({ type: "notice", tone: "warning", text: clip(msg) });
+    return;
+  }
+
+  if (payload.type === "error" || payload.type === "stream_error") {
+    const msg = String(payload.message || payload.error?.message || payload.text || "Error").trim();
+    if (msg) state.items.push({ type: "notice", tone: "error", text: clip(msg) });
+    return;
+  }
+
   if (payload.type !== "item_completed" || !payload.item) return;
   const item = payload.item;
 

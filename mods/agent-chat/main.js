@@ -2004,30 +2004,67 @@ export default class AgentChat extends View {
       );
     }
 
-    // Errors, interruptions, model switches: one quiet line in the turn.
+    // Errors, warnings, interruptions, model switches: distinct from assistant prose.
     if (block.type === "notice") {
-      const isError = block.tone === "error";
+      const tone = block.tone || "info";
       const errColor = t.ansi1 || "#ef4444";
+      const warnColor = t.blocked || t.ansi3 || "#f59e0b";
+
+      if (tone === "warning" || tone === "error") {
+        const color = tone === "error" ? errColor : warnColor;
+        return column(
+          h_flex()
+            .w_full()
+            .items_start()
+            .gap(8)
+            .my(6)
+            .px(12)
+            .py(7)
+            .rounded(8)
+            .bg(withAlpha(color, "14"))
+            .border_1()
+            .border_color(withAlpha(color, "55"))
+            .child(svg("mods/agent-chat/icons/shield-alert.svg").size(13).flex_none().mt(2).text_color(color))
+            .child(
+              div()
+                .flex_1()
+                .min_w(0)
+                .font_family(monoFont)
+                .text_size(11.5)
+                .line_height("18px")
+                .text_color(color)
+                .child(block.text || "")
+            )
+        );
+      }
+
       return column(
         h_flex()
           .w_full()
-          .items_start()
-          .gap(8)
-          .py(6)
+          .items_center()
+          .gap(10)
+          .py(8)
+          .child(div().flex_1().h(1).bg(withAlpha(t.border, "80")))
           .child(
-            svg(isError ? "mods/agent-chat/icons/shield-alert.svg" : "mods/agent-chat/icons/corner-up-right.svg")
-              .size(13)
-              .text_color(isError ? errColor : t.dim)
+            h_flex()
+              .items_center()
+              .gap(6)
+              .px(10)
+              .py(2)
+              .rounded_full()
+              .bg(t.raised)
+              .border_1()
+              .border_color(t.border)
+              .child(svg("mods/agent-chat/icons/corner-up-right.svg").size(11).text_color(t.dim))
+              .child(
+                div()
+                  .font_family(monoFont)
+                  .text_size(11)
+                  .text_color(t.dim)
+                  .child(block.text || "")
+              )
           )
-          .child(
-            div()
-              .flex_1()
-              .min_w(0)
-              .text_size(12.5)
-              .line_height("19px")
-              .text_color(isError ? errColor : t.dim)
-              .child(block.text || "")
-          )
+          .child(div().flex_1().h(1).bg(withAlpha(t.border, "80")))
       );
     }
 

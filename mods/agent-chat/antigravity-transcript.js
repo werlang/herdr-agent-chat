@@ -113,8 +113,14 @@ export function ingestAntigravityEntry(state, entry) {
   }
 
   if (type === "ERROR_MESSAGE") {
-    const text = String(entry.content || entry.message || "Error").trim();
+    const text = String(entry.error || entry.content || entry.message || "Error").trim();
     if (text) state.items.push({ type: "notice", tone: "error", text: clip(text) });
+    return;
+  }
+
+  if (type === "WARNING_MESSAGE" || type === "SYSTEM_WARNING") {
+    const text = String(entry.warning || entry.content || entry.message || "Warning").trim();
+    if (text) state.items.push({ type: "notice", tone: "warning", text: clip(text) });
   }
 }
 

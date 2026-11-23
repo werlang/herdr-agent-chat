@@ -122,3 +122,23 @@ const claudeWelcome = ` ▐▛███▛█   Claude Code v2.1.319
 `;
 assert.deepStrictEqual(parseConversation(claudeWelcome), []);
 console.log("Claude welcome screen parses to no turns.");
+
+// Harness warnings, errors, and footer chrome are separated from assistant prose.
+const harnessScreen = `
+> run check
+Here is the answer.
+⚠ 5h limit: 45% left · resets at 15:53 · /status
+✻ Worked for 53s · done 3:28 PM
+✔ Update installed · /restart to apply
+⚠ 3 warnings · f2 to view
+› Ask Codex to do anything
+`;
+const harnessBlocks = parseConversation(harnessScreen);
+assert.deepStrictEqual(
+  harnessBlocks.map((b) => ({ type: b.type, tone: b.tone, text: b.text })),
+  [
+    { type: "user", tone: undefined, text: "run check" },
+    { type: "assistant", tone: undefined, text: "Here is the answer." },
+    { type: "notice", tone: "warning", text: "5h limit: 45% left · resets at 15:53 · /status" },
+  ]
+);

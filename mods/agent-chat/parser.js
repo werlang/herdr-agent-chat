@@ -94,7 +94,12 @@ function stripBottomChrome(lines) {
       /^(?:Gemini|Claude|OpenCode|Codex)\s+[\w.\s·]+$/i.test(line) ||
       /^[a-z0-9][a-z0-9._-]+(?:\s+(?:low|medium|high|xhigh|extra high|max|ultra))?\s+·\s+\d+%\s+left\b/i.test(line) ||
       /^(?:tab\s+agents?|ctrl\+p\s+commands?|ctrl\+t\s+variants?)/i.test(line) ||
-      /●\s+\[[\d:]+\]\s+hc\s+wait/i.test(line)
+      /●\s+\[[\d:]+\]\s+hc\s+wait/i.test(line) ||
+      /^[✔✓]\s*Update installed\b/i.test(line) ||
+      /^⚠\s*\d+\s+warnings?\s*·/i.test(line) ||
+      /←\s*for agents/i.test(line) ||
+      /^›\s*Ask Codex to do anything/i.test(line) ||
+      /^[A-Za-z0-9._-]+\s+(?:low|medium|high|xhigh|max|ultra)\s+·\s+~?\//i.test(line)
     ) {
       endIndex--;
       continue;
@@ -155,6 +160,10 @@ export function parseConversation(rawText) {
       const text = currentBlock.lines.join("\n").trim();
       if (text) {
         rawBlocks.push({ type: "assistant", text });
+      }
+    } else if (currentBlock.type === "notice") {
+      if (currentBlock.text) {
+        rawBlocks.push({ type: "notice", tone: currentBlock.tone || "info", text: currentBlock.text });
       }
     }
     currentBlock = null;
@@ -219,6 +228,32 @@ export function parseConversation(rawText) {
       } else {
         pushCurrent();
       }
+    }
+
+    // Skip Claude turn-timer footers ("✻ Worked for 53s · done 3:28 PM")
+    if (/^[✻∴]\s*(?:Worked|Cogitated|Churned|Baked|Cooked|Brewed)\s+for\s+/i.test(trimmed)) {
+      pushCurrent();
+      continue;
+    }
+
+    // Harness warnings and errors (never render as assistant prose)
+    const warnMatch = trimmed.match(/^(?:⚠|Warning:|WARN\b)\s*(.+)$/);
+    if (warnMatch) {
+      pushCurrent();
+      rawBlocks.push({ type: "notice", tone: "warning", text: warnMatch[1].trim() });
+      continue;
+    }
+    const errMatch = trimmed.match(/^(?:✖|✗|Error:|ERROR\b)\s*(.+)$/);
+    if (errMatch) {
+      pushCurrent();
+      rawBlocks.push({ type: "notice", tone: "error", text: errMatch[1].trim() });
+      continue;
+    }
+    const bgMatch = trimmed.match(/^●\s+(Background command\s+.+)$/);
+    if (bgMatch) {
+      pushCurrent();
+      rawBlocks.push({ type: "notice", tone: "info", text: bgMatch[1].trim() });
+      continue;
     }
 
     // Thought blocks
