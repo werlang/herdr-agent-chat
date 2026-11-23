@@ -29,6 +29,7 @@ import {
   placement,
   window,
   fonts,
+  checking,
 } from "herdr";
 import {
   parseConversation,
@@ -541,6 +542,10 @@ export default class AgentChat extends View {
         }
       }
     }
+
+    // `herdr-app check` calls init() only to validate the view tree; skip
+    // background spawns and timers so no tasks are left stranded on reload.
+    if (checking()) return;
 
     // `props.open` ("model" | "agent") starts with that picker open, so it can
     // be looked at without a click.
