@@ -13,7 +13,12 @@
 import { exec, agents, terminals, home } from "herdr";
 import * as fs from "fs/promises";
 import { itemsToBlocks, terminalMachine } from "./transcript-blocks.js";
-import { buildOpenCodePollQuery, buildOpenCodeEarlierQuery, OpenCodeItemCache } from "./opencode-data.js";
+import {
+  buildOpenCodePollQuery,
+  buildOpenCodeEarlierQuery,
+  extractOpenCodeSessionId,
+  OpenCodeItemCache,
+} from "./opencode-data.js";
 
 export { textOf, clip, toolTitle, classifyTool, itemsToBlocks } from "./transcript-blocks.js";
 
@@ -134,12 +139,7 @@ export class OpenCodeTranscript {
       !this.sessionId && !title && Number(term?.created_ms) > 0
         ? Math.max(0, Number(term.created_ms) - 5000)
         : 0;
-    const sessionId =
-      (Array.isArray(term?.records) ? term.records : [])
-        .slice()
-        .reverse()
-        .map((r) => String(r || "").match(/\b(ses_[A-Za-z0-9]+)\b/)?.[1])
-        .find(Boolean) || null;
+    const sessionId = extractOpenCodeSessionId(term?.records);
     this.itemsCache.rebuilds = 0;
 
     // One sqlite3 process resolves the session and returns its changed rows.

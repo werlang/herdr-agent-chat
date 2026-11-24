@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import {
   buildOpenCodePollQuery,
+  extractOpenCodeSessionId,
   messageItems,
   OpenCodeItemCache,
   resolveOpenCodeModel,
@@ -335,4 +336,19 @@ test("resolveOpenCodeModel prefers the transcript provider and exact ids", () =>
   );
   assert.equal(resolveOpenCodeModel(OC_MODELS, OC_PROVIDERS, "missing-model OpenCode Go"), null);
   assert.equal(resolveOpenCodeModel([], OC_PROVIDERS, "GLM-5.3"), null);
+});
+
+test("extractOpenCodeSessionId reads both object-keyed and array records", () => {
+  assert.equal(
+    extractOpenCodeSessionId({
+      ses_df0337f7affeq246qqcJctU0x4: { app: "opencode", state: "working" },
+    }),
+    "ses_df0337f7affeq246qqcJctU0x4"
+  );
+  assert.equal(
+    extractOpenCodeSessionId(["other", "ses_abc123", "ses_def456"]),
+    "ses_def456"
+  );
+  assert.equal(extractOpenCodeSessionId(null), null);
+  assert.equal(extractOpenCodeSessionId({}), null);
 });

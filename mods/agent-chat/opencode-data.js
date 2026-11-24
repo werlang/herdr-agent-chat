@@ -6,6 +6,26 @@ import { clip, textOf, toolTitle, classifyTool, stripHarnessXml } from "./transc
 const q = (s) => `'${String(s).replace(/'/g, "''")}'`;
 
 /**
+ * Extracts the latest OpenCode session id (`ses_...`) from `terminal.records`,
+ * which Herdr may expose either as a keyed object (`{ "ses_...": {...} }`) or
+ * as an array of strings.
+ * @param {unknown} records
+ * @returns {string|null}
+ */
+export function extractOpenCodeSessionId(records) {
+  const entries = Array.isArray(records)
+    ? records
+    : records && typeof records === "object"
+      ? Object.keys(records)
+      : [];
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const match = String(entries[i] || "").match(/\b(ses_[A-Za-z0-9]+)\b/);
+    if (match) return match[1];
+  }
+  return null;
+}
+
+/**
  * Lowercases and collapses whitespace so TUI labels and catalogue names
  * compare the same way.
  * @param {unknown} value
