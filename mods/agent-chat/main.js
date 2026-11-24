@@ -12,7 +12,7 @@
 // load a page at a time. Only a bounded window of rows is built, so a long
 // session does not cost a full transcript render on every poll.
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, TextareaState, Textarea, TextView } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView } from "gpui-base";
 import {
   hc,
   exec,
@@ -60,6 +60,7 @@ import {
   prependEarlierBlocks,
   preserveScrollOnResize,
   applyPrependAnchor,
+  matchesModelQuery,
   parseScreenModel,
   needsInitialEarlierLoad,
 } from "./transcript-blocks.js";
@@ -78,6 +79,9 @@ const COLUMN = 760;
 /** Turns kept in the initial batch, and added per lazy-load batch. */
 const FEED_WINDOW = 8;
 const FEED_PAGE = 8;
+
+/** Show the model search input when more than this many models are available. */
+const MODEL_SEARCH_THRESHOLD = 6;
 
 /**
  * Installs app-wide keybindings for AgentChat once per process.
@@ -487,6 +491,9 @@ export default class AgentChat extends View {
       this.inputFocused = false;
       cx.notify();
     });
+
+    this.modelSearch = InputState.new({ placeholder: "Search models…", value: "" });
+    this.modelSearch.on("change", (_e, cx) => cx.notify());
 
     cx.spawn(async (cx) => {
       try {
@@ -3269,6 +3276,12 @@ export default class AgentChat extends View {
     return this.currentModelInfo().model;
   }
 
+  /** Closes the model menu and clears any active search query. */
+  closeModelMenu() {
+    this.modelMenuOpen = false;
+    this.modelSearch?.set_value("");
+  }
+
   /** Switches Antigravity's model optimistically and sends `/model <id>`. */
   switchAntigravityModel(targetId, cx) {
     if (this.terminal && targetId) {
@@ -3562,23 +3575,40 @@ export default class AgentChat extends View {
       ? this.codexModels.find((m) => m.slug === currentCodexSlug) || null
       : null;
 
+    const totalModelCount = isClaude
+      ? this.claudeModels.length
+      : isOpenCode
+      ? this.models.length
+      : isCodex
+      ? this.codexModels.length
+      : isAntigravity
+      ? agyFamilies.length
+      : 0;
+    const showSearch = totalModelCount > MODEL_SEARCH_THRESHOLD;
+    const searchQuery = showSearch ? (this.modelSearch?.value() || "").trim() : "";
+
     /** @type {any[]} */
     let modelRows = [];
     if (isClaude && this.claudeModels.length > 0) {
-      modelRows = [
-        ...this.claudeModels.map((m) =>
-          row(
-            `model-${m.id}`,
-            m.label,
-            m.note,
-            m.id !== "default" && Boolean(currentClaudeModel && currentClaudeModel.id === m.id),
-            (_e, cx) => this.chooseModel(`/model ${m.id}`, cx)
+      const filtered = this.claudeModels.filter((m) =>
+        matchesModelQuery(searchQuery, [m.label, m.id, m.note])
+      );
+      modelRows = filtered.map((m) =>
+        row(
+          `model-${m.id}`,
+          m.label,
+          m.note,
+          m.id !== "default" && Boolean(currentClaudeModel && currentClaudeModel.id === m.id),
+          (_e, cx) => this.chooseModel(`/model ${m.id}`, cx)
+        )
+      );
+      if (!searchQuery) {
+        modelRows.push(
+          row("model-open-native", "More models…", "Open Claude Code's /model picker", false, (_e, cx) =>
+            this.chooseModel("/model", cx)
           )
-        ),
-        row("model-open-native", "More models…", "Open Claude Code's /model picker", false, (_e, cx) =>
-          this.chooseModel("/model", cx)
-        ),
-      ];
+        );
+      }
     } else if (isClaude) {
       modelRows = [
         row(
@@ -3604,13 +3634,16 @@ export default class AgentChat extends View {
       });
       const ocCurrent = this.currentOpenCodeModel();
       for (const provider of order) {
-        modelRows.push(
-          div().px(10).pt(6).pb(2).text_size(10.5).font_semibold().text_color(t.dim).child(providerName(provider))
-        );
+        const pName = providerName(provider);
         const entries = groups
           .get(provider)
+          .filter((m) => matchesModelQuery(searchQuery, [m.name, m.modelID, pName, provider]))
           .slice()
           .sort((a, b) => (a.name || a.modelID).localeCompare(b.name || b.modelID));
+        if (entries.length === 0) continue;
+        modelRows.push(
+          div().px(10).pt(6).pb(2).text_size(10.5).font_semibold().text_color(t.dim).child(pName)
+        );
         for (const m of entries) {
           const isCurrent = ocCurrent
             ? ocCurrent.providerID === m.providerID && ocCurrent.modelID === m.modelID
@@ -3627,7 +3660,9 @@ export default class AgentChat extends View {
         }
       }
     } else if (isCodex && this.codexModels.length > 0) {
-      modelRows = this.codexModels.map((m) =>
+      modelRows = this.codexModels
+        .filter((m) => matchesModelQuery(searchQuery, [m.display_name, m.slug, m.description]))
+        .map((m) =>
         row(
           `model-${m.slug}`,
           m.display_name || m.slug,
@@ -3647,7 +3682,9 @@ export default class AgentChat extends View {
         ),
       ];
     } else if (isAntigravity && agyFamilies.length > 0) {
-      modelRows = agyFamilies.map((fam) => {
+      modelRows = agyFamilies
+        .filter((fam) => matchesModelQuery(searchQuery, [fam.label, fam.id, ...Object.values(fam.variants)]))
+        .map((fam) => {
         const curEff = (currentEffort || currentAgyParsed?.effort || "medium").toLowerCase();
         const targetId = fam.variants[curEff] || fam.variants.medium || fam.variants.default || Object.values(fam.variants)[0] || fam.id;
         return row(
@@ -3657,7 +3694,7 @@ export default class AgentChat extends View {
           Boolean(currentAgyFamily && currentAgyFamily.id === fam.id),
           (_e, cx) => this.switchAntigravityModel(targetId, cx)
         );
-      });
+        });
     } else if (isAntigravity) {
       modelRows = [
         row(
@@ -3673,6 +3710,17 @@ export default class AgentChat extends View {
         row("model-open-native", "Open native model selector", `Run /models in ${agentName}`, false, (_e, cx) =>
           this.chooseModel("/models", cx)
         ),
+      ];
+    }
+
+    if (searchQuery && modelRows.length === 0) {
+      modelRows = [
+        div()
+          .px(10)
+          .py(12)
+          .text_size(12)
+          .text_color(t.dim)
+          .child(`No models match "${searchQuery}".`),
       ];
     }
 
@@ -3776,9 +3824,9 @@ export default class AgentChat extends View {
               .p(8)
               .border_r(1)
               .border_color(t.border)
-              .overflow_y_scrollbar()
               .child(
                 div()
+                  .flex_none()
                   .px(8)
                   .pt(4)
                   .pb(6)
@@ -3787,7 +3835,53 @@ export default class AgentChat extends View {
                   .text_color(t.dim)
                   .child("MODELS")
               )
-              .children(modelRows)
+              .when(showSearch, (el) =>
+                el.child(
+                  h_flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(6)
+                    .mx(4)
+                    .mb(6)
+                    .px(8)
+                    .h(28)
+                    .rounded(8)
+                    .bg(t.background)
+                    .border_1()
+                    .border_color(t.border)
+                    .child(svg("mods/agent-chat/icons/search.svg").size(12).flex_none().text_color(t.dim))
+                    .child(
+                      div()
+                        .flex_1()
+                        .min_w(0)
+                        .child(Input.new(this.modelSearch).w_full().text_size(12).text_color(t.foreground))
+                    )
+                    .when(Boolean(searchQuery), (bar) =>
+                      bar.child(
+                        div()
+                          .id("model-search-clear")
+                          .cursor_pointer()
+                          .px(4)
+                          .text_size(13)
+                          .text_color(t.dim)
+                          .hover((s) => s.text_color(t.foreground))
+                          .on_click((_e, cx) => {
+                            this.modelSearch.set_value("");
+                            cx.notify();
+                          })
+                          .child("×")
+                      )
+                    )
+                )
+              )
+              .child(
+                v_flex()
+                  .id("model-menu-models-list")
+                  .flex_1()
+                  .min_h(0)
+                  .overflow_y_scrollbar()
+                  .children(modelRows)
+              )
           )
           // Right Column: Reasoning Effort
           .child(
@@ -3814,7 +3908,7 @@ export default class AgentChat extends View {
                     .px(8)
                     .text_size(11)
                     .text_color(t.dim)
-                    .child(ocModel ? "This model has no effort levels." : "Loading model details…")
+                    .child(this.modelsLoading ? "Loading model details…" : "This model has no effort levels.")
                 )
               )
           )
