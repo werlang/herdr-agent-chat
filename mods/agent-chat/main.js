@@ -504,15 +504,15 @@ export default class AgentChat extends View {
       } catch (_e) {}
     });
 
-    // `props.demo` ("opencode" | "claude") shows a fixed conversation that
-    // uses every element, with no agent behind it. See demo-blocks.js.
+    // `props.demo` ("opencode" | "claude" | "preview") shows a fixed
+    // conversation that uses every element, with no agent behind it. See
+    // demo-blocks.js.
     this.demo = p?.demo ? String(p.demo) : null;
     if (this.demo) {
       this.terminal = "demo";
       this.followFocused = false;
-      this.setBlocks(
-        assignKeys(demoBlocks(this.demo === "claude" ? "claude" : "opencode", p?.part ?? null), [])
-      );
+      const demoStyle = this.demo === "claude" ? "claude" : this.demo === "preview" ? "preview" : "opencode";
+      this.setBlocks(assignKeys(demoBlocks(demoStyle, p?.part ?? null), []));
       this.windowStart = Math.max(0, this.blocks.length - FEED_WINDOW);
       // `props.expand` opens every group, thought and tool call up front.
       if (p?.expand) {
@@ -3291,6 +3291,9 @@ export default class AgentChat extends View {
 
   /** `{ model, effort }` display names; either may be null when it cannot be told. */
   currentModelInfo() {
+    // A demo has no terminal behind it; the composer still names a model so
+    // the preview looks like a real session.
+    if (this.demo) return { model: "Claude Opus 5.5", effort: "high" };
     const agent = findAgent(this.terminal);
     const app = agentApp(agent);
     if (app === "codex") {
@@ -4510,7 +4513,7 @@ export default class AgentChat extends View {
                     div()
                       .text_size(11.5)
                       .text_color(t.foreground)
-                      .child(this.followFocused ? "Auto" : (this.terminal || "Agent"))
+                      .child(this.demo ? "Preview" : this.followFocused ? "Auto" : (this.terminal || "Agent"))
                   )
                   .child(svg("mods/agent-chat/icons/chevron-down.svg").size(10).flex_none().text_color(t.dim))
               )

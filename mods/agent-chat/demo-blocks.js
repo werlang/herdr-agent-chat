@@ -102,13 +102,82 @@ line two right after it, and an entity: 5 &lt; 6 &amp; 7 &gt; 3.`;
 export const SHOWCASE_PARTS = SHOWCASE_RAW.split("@@SPLIT@@");
 export const SHOWCASE_MARKDOWN = SHOWCASE_PARTS.join("");
 
+/** A polished English conversation for the README preview: one real coding turn. */
+const PREVIEW_MARKDOWN = `## Streaming session store
+
+The store keeps its last snapshot and emits only the rows that changed. The feed merges them into the existing block keys, so the scroll anchor survives every poll.
+
+### What changed
+
+- [x] \`session-store.js\` diffs each poll against the last snapshot.
+- [x] \`feed.js\` applies the delta in place and keeps the sticky tail.
+- [x] Identical polls cost one comparison and zero repaints.
+
+| Before | After |
+|:-------|:------|
+| Rebuilt every turn | Merges changed rows |
+| Scroll jumped while streaming | Sticky tail stays put |
+
+\`\`\`js
+export function applyDelta(previous, next) {
+  const changed = next.filter((row) => previous.get(row.seq) !== row);
+  return { rows: next, changed };
+}
+\`\`\`
+
+> New turns stream in underneath. The reading window only moves when you scroll.
+
+\`npm test\` — 24 files passed · \`npm run lint\` — clean.`;
+
+/** One user turn that shows the feed, a worked section, and rich Markdown. */
+function previewItems() {
+  const workedMs = 18200;
+  const turn = { turn: 2, workedMs };
+  const tool = (name, input, title, detail) => ({
+    type: "tool",
+    name,
+    input,
+    title,
+    detail,
+    status: "done",
+    ...turn,
+  });
+  return [
+    {
+      type: "user",
+      text: "Add streaming deltas to the session store, then verify the chat stays pinned while it updates.",
+    },
+    {
+      type: "thought",
+      text: "**Tracing the store's read path** The feed rebuilds every block from the polled rows, so the delta needs stable keys and an anchor. I'll diff by row seq, keep the last snapshot, and merge only changed rows.",
+      status: "done",
+      ...turn,
+    },
+    tool("bash", { command: "wc -l src/session-store.js" }, "bash · wc -l session-store.js", "412 src/session-store.js"),
+    tool("bash", { command: "npm test -- session-store" }, "bash · npm test -- session-store", "✔ 18 tests passed"),
+    tool("edit", { file_path: "src/session-store.js" }, "edit · session-store.js", "+ export function applyDelta(previous, next) { … }"),
+    tool("edit", { file_path: "src/feed.js" }, "edit · feed.js", "merge the delta into the existing blocks"),
+    tool("bash", { command: "npm run lint" }, "bash · npm run lint", "24 files, no issues"),
+    { type: "assistant", text: PREVIEW_MARKDOWN, seq: 2, ...turn },
+    { type: "user", text: "What happens if I scroll up while it streams?", seq: 3, turn: 3 },
+    {
+      type: "assistant",
+      text: "The window stays frozen where you left it. New turns keep streaming underneath, and **Scroll to end** jumps back to the live tail.",
+      seq: 4,
+      turn: 4,
+    },
+  ];
+}
+
 /**
  * Items for the demo conversation.
- * @param {"opencode"|"claude"} [style] opencode groups a turn under "Worked for…";
- *   claude folds runs of tool calls (its items carry no `turn`).
+ * @param {"opencode"|"claude"|"preview"} [style] opencode groups a turn under
+ *   "Worked for…"; claude folds runs of tool calls (its items carry no `turn`);
+ *   preview is the curated English turn used for the README screenshot.
  * @returns {Array<object>}
  */
 export function demoItems(style = "opencode", part = null) {
+  if (style === "preview") return previewItems();
   const showcase =
     part === "a"
       ? SHOWCASE_PARTS[0].trimEnd()
