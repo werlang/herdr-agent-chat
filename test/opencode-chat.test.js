@@ -5,6 +5,7 @@ import {
   buildOpenCodePollQuery,
   messageItems,
   OpenCodeItemCache,
+  resolveOpenCodeModel,
 } from "../mods/agent-chat/opencode-data.js";
 import { itemsToBlocks } from "../mods/agent-chat/transcript-blocks.js";
 
@@ -292,4 +293,46 @@ test("claude-style items fold a run of thoughts and tools into one section, in o
   assert.deepEqual(blocks.map((b) => b.type), ["user", "tool_group", "assistant", "thought", "assistant"]);
   assert.equal(blocks[1].count, 2);
   assert.deepEqual(blocks[1].thoughts.map((x) => x.text), ["first thought", "second thought"]);
+});
+
+const OC_MODELS = [
+  { modelID: "deepseek-v4.1-flash", providerID: "opencode", name: "DeepSeek V4.1 Flash 1017" },
+  { modelID: "deepseek-v4.1-flash", providerID: "opencode-go", name: "DeepSeek V4.1 Flash 1017" },
+  { modelID: "glm-5.3", providerID: "opencode-go", name: "GLM-5.3" },
+  { modelID: "glm-5.3-flash", providerID: "opencode-go", name: "GLM-5.3-Flash" },
+  { modelID: "hy4-flash-free", providerID: "opencode-go", name: "Hy4 flash Free" },
+];
+const OC_PROVIDERS = { opencode: "Default / OpenCode", "opencode-go": "OpenCode Go" };
+
+test("resolveOpenCodeModel reads the TUI footer's model-and-provider label", () => {
+  assert.equal(
+    resolveOpenCodeModel(OC_MODELS, OC_PROVIDERS, "DeepSeek V4.1 Flash 1017 OpenCode Go")?.providerID,
+    "opencode-go"
+  );
+  assert.equal(
+    resolveOpenCodeModel(OC_MODELS, OC_PROVIDERS, "Hy4 flash Free OpenCode Go")?.modelID,
+    "hy4-flash-free"
+  );
+  assert.equal(
+    resolveOpenCodeModel(OC_MODELS, OC_PROVIDERS, "GLM-5.3 OpenCode Go")?.modelID,
+    "glm-5.3"
+  );
+  assert.equal(
+    resolveOpenCodeModel(OC_MODELS, OC_PROVIDERS, "GLM-5.3-Flash OpenCode Go")?.modelID,
+    "glm-5.3-flash",
+    "the longest catalogue name wins over a prefix"
+  );
+});
+
+test("resolveOpenCodeModel prefers the transcript provider and exact ids", () => {
+  assert.equal(
+    resolveOpenCodeModel(OC_MODELS, OC_PROVIDERS, "deepseek-v4.1-flash", "opencode-go")?.providerID,
+    "opencode-go"
+  );
+  assert.equal(
+    resolveOpenCodeModel(OC_MODELS, OC_PROVIDERS, "DeepSeek V4.1 Flash 1017")?.providerID,
+    "opencode"
+  );
+  assert.equal(resolveOpenCodeModel(OC_MODELS, OC_PROVIDERS, "missing-model OpenCode Go"), null);
+  assert.equal(resolveOpenCodeModel([], OC_PROVIDERS, "GLM-5.3"), null);
 });

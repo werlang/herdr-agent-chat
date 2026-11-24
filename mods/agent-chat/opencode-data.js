@@ -6,6 +6,67 @@ import { clip, textOf, toolTitle, classifyTool, stripHarnessXml } from "./transc
 const q = (s) => `'${String(s).replace(/'/g, "''")}'`;
 
 /**
+ * Lowercases and collapses whitespace so TUI labels and catalogue names
+ * compare the same way.
+ * @param {unknown} value
+ * @returns {string}
+ */
+function normalizeModelLabel(value) {
+  return String(value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+/**
+ * Resolves the catalogue entry for the model an OpenCode session is using.
+ * The session store names the model by id, but before a session exists the TUI
+ * footer is the only source, and it appends the provider name to the model
+ * name ("DeepSeek V4.1 Flash 1017 OpenCode Go"), so an exact name match fails
+ * and the picker cannot show its initial model or effort levels.
+ * @param {Array<{id?: string, modelID?: string, providerID?: string, name?: string}>} models
+ * @param {Record<string, string>} providers providerID → display name
+ * @param {string|null|undefined} label model id, catalogue name, or TUI footer label
+ * @param {string|null} [providerHint] provider reported by the session, when known
+ * @returns {object|null}
+ */
+export function resolveOpenCodeModel(models, providers, label, providerHint = null) {
+  if (!Array.isArray(models) || models.length === 0) return null;
+  const wanted = normalizeModelLabel(label);
+  if (!wanted) return null;
+
+  const modelId = (m) => m.modelID || m.id || "";
+  const modelName = (m) => normalizeModelLabel(m.name || modelId(m));
+  const providerName = (id) => normalizeModelLabel(providers?.[id] || id || "");
+  const matchesLabel = (m) =>
+    [modelId(m), m.name].some((value) => normalizeModelLabel(value) === wanted);
+
+  // The transcript's provider settles a duplicate model id across providers.
+  const byProvider = providerHint
+    ? models.find((m) => m.providerID === providerHint && matchesLabel(m))
+    : null;
+  if (byProvider) return byProvider;
+
+  const exact = models.find(matchesLabel);
+  if (exact) return exact;
+
+  // A TUI footer label is "<model name> <provider name>". Keep the longest
+  // matching name so "DeepSeek V4.1 Flash 1017" wins over a shorter prefix,
+  // and require the remainder to be the provider's display name or id.
+  let best = null;
+  let partial = null;
+  for (const m of models) {
+    const name = modelName(m);
+    if (!name || !wanted.startsWith(name)) continue;
+    if (name.length > (partial?.score || 0)) partial = { score: name.length, model: m };
+    const rest = wanted.slice(name.length).trim();
+    if (!rest) continue;
+    const matchesProvider = rest === providerName(m.providerID) || rest === normalizeModelLabel(m.providerID);
+    if (!matchesProvider) continue;
+    const score = name.length + (providerHint && m.providerID === providerHint ? 1000 : 0);
+    if (!best || score > best.score) best = { score, model: m };
+  }
+  return best?.model || partial?.model || null;
+}
+
+/**
  * Duration of an assistant turn from its own timestamps. A running turn uses
  * its latest part time so the value is stable for the same row data.
  * @param {object} data

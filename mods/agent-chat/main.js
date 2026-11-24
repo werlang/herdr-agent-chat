@@ -69,6 +69,7 @@ import { pickBodyFont } from "./body-font.js";
 import { ClaudeTranscript } from "./claude-transcript.js";
 import { OpenCodeTranscript } from "./opencode-transcript.js";
 import { CodexTranscript } from "./codex-transcript.js";
+import { resolveOpenCodeModel } from "./opencode-data.js";
 import { AntigravityTranscript } from "./antigravity-transcript.js";
 
 /** Width of the reading column, in px. */
@@ -3197,10 +3198,11 @@ export default class AgentChat extends View {
       const tr = this.transcript instanceof OpenCodeTranscript && this.transcript.terminal === this.terminal
         ? this.transcript
         : null;
-      const known = this.models.find(
-        (m) => m.modelID === tr?.model && (!tr?.provider || m.providerID === tr.provider)
-      );
+      const known = this.currentOpenCodeModel();
       const seen = parseScreenModel(this.rawText, "opencode");
+      // Before the first session row exists the TUI footer is the only
+      // source; it names the model as "<name> <provider>", so resolve it
+      // against the catalogue instead of showing the raw label.
       const model = known?.name || tr?.modelLabel || seen?.model || null;
       if (!model) return { model: null, effort: null };
       return { model, effort: effortLabel(tr?.effort || seen?.effort) };
@@ -3380,11 +3382,20 @@ export default class AgentChat extends View {
 
   /** The catalogue entry of the OpenCode session's current model, or null. */
   currentOpenCodeModel() {
-    const tr = this.transcript;
-    if (!(tr instanceof OpenCodeTranscript) || tr.terminal !== this.terminal || !tr.model) return null;
-    return (
-      this.models.find((m) => m.modelID === tr.model && (!tr.provider || m.providerID === tr.provider)) || null
-    );
+    const tr = this.transcript instanceof OpenCodeTranscript && this.transcript.terminal === this.terminal
+      ? this.transcript
+      : null;
+    if (!tr && agentApp(findAgent(this.terminal)) !== "opencode") return null;
+    if (tr?.model) {
+      const exact =
+        this.models.find((m) => m.modelID === tr.model && (!tr.provider || m.providerID === tr.provider)) ||
+        this.models.find((m) => m.modelID === tr.model);
+      if (exact) return exact;
+    }
+    // No session row yet (a fresh TUI): the footer still names the model and
+    // the catalogue knows its variants, so effort stays selectable.
+    const seen = parseScreenModel(this.rawText, "opencode");
+    return resolveOpenCodeModel(this.models, this.providers, tr?.model || seen?.model, tr?.provider || null);
   }
 
   /**
