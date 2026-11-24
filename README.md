@@ -24,6 +24,7 @@ Instead of keeping agent sessions confined to raw terminal buffers, `agent-chat`
 - **Idle When Hidden**: Pauses transcript and SQLite polling while the chat pane is in another tab, settled, or behind a zoomed sibling, so switching back to the terminal no longer leaves the TUI doing background work.
 - **Live Status & Sub-Agent Strip**: Shows active states (`Working` with spinner, `Needs you` badge, `Done`, `Error`, or `Idle`) and a sub-agent pill strip for jumping into spawned worker terminals.
 - **Quick Approvals**: When an agent prompts for confirmation (`[y/N]` or permission checks), one-click action buttons (`Approve (Enter)`, `Yes (y)`, `No (n)`, `Cancel (Esc)`) trigger instant key events via `hc`.
+- **Antigravity quota errors**: A quota failure on the current terminal screen appears in the feed with the reset time. Approval buttons stay hidden while that failure is current, even if the reported status is still `blocked`.
 - **Two-Way Prompt Input & Stop Control**: A multi-line composer at the bottom delivers prompts via `hc send <terminal>` (Enter sends, Shift+Enter inserts a line break) and exposes a **Stop** button (`hc interrupt <terminal>`) while the agent is working.
 - **Real Model Picker**: Claude Code lists its models and effort levels; OpenCode's catalogue comes from its own server (`/api/model`), grouped by provider, and switching calls `POST /api/session/<id>/model` instead of asking you to switch to the terminal.
 

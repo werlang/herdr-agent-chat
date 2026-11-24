@@ -1,5 +1,5 @@
 import assert from "node:assert";
-import { parseConversation, stripAnsi } from "../mods/agent-chat/parser.js";
+import { parseConversation, stripAnsi, terminalQuotaFailure } from "../mods/agent-chat/parser.js";
 
 // Test 1: stripAnsi
 const ansiText = "\x1b[32mHello\x1b[0m \x1b[1mWorld\x1b[0m\r\n";
@@ -142,3 +142,33 @@ assert.deepStrictEqual(
     { type: "notice", tone: "warning", text: "5h limit: 45% left · resets at 15:53 · /status" },
   ]
 );
+
+// Antigravity reports the quota failure above its idle composer.
+const quotaMessage = "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 45h21m6s.";
+const quotaNotice = `⚠ ${quotaMessage}
+Error ID: 7afc59bc-7467-43c5-a347-a428b8e62ba2-26`;
+const agyQuotaScreen = `
+> sim
+● Ran 3 commands
+
+${quotaNotice}
+
+────────────────
+>
+────────────────
+? for shortcuts     auto · Claude Sonnet 5.5 · medium`;
+assert.strictEqual(terminalQuotaFailure(agyQuotaScreen)?.text, quotaMessage);
+assert.strictEqual(
+  terminalQuotaFailure(agyQuotaScreen.replace("increase your limits.", "increase your\n  limits."))?.text,
+  quotaMessage
+);
+assert.deepStrictEqual(parseConversation(agyQuotaScreen).slice(-1), [
+  { type: "notice", tone: "error", text: quotaMessage },
+]);
+assert.strictEqual(terminalQuotaFailure(`${agyQuotaScreen}
+
+Allow this command?
+  1. Allow once
+  2. Deny
+Esc to cancel`), null);
+assert.strictEqual(terminalQuotaFailure(agyQuotaScreen.replace("\n>\n", "\n> new request\n")), null);

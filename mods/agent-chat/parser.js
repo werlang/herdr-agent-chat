@@ -21,6 +21,26 @@ export function stripAnsi(str) {
     .replace(/\r/g, "");
 }
 
+/**
+ * Reads Antigravity's current quota failure from the screen above its idle
+ * composer. Other output below the error (such as a permission dialog) makes
+ * it historical, even if the error is still visible.
+ */
+export function terminalQuotaFailure(text) {
+  const lines = stripAnsi(text).trimEnd().split("\n");
+  const errorId = lines.findLastIndex((line) => /^\s*Error ID:\s*[\da-f-]+\s*$/i.test(line));
+  if (errorId < 1) return null;
+  const tail = lines.slice(errorId + 1).map((line) => line.trim()).filter(Boolean);
+  if (!tail.includes(">") || !tail.every((line) => /^(?:>|[─━]{4,}|\? for shortcuts(?:\s.*)?)$/.test(line))) {
+    return null;
+  }
+  const start = lines.slice(0, errorId).findLastIndex((line) => /^\s*⚠\s+Individual quota reached\b/i.test(line));
+  if (start < 0) return null;
+  const message = lines.slice(start, errorId).map((line) => line.trim()).join(" ");
+  const match = message.match(/^⚠\s+(Individual quota reached\.[^⚠>]*\bResets in [\dhms]+\.)$/i);
+  return match ? { start, text: match[1] } : null;
+}
+
 const SPINNERS = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷";
 const SPINNER_REGEX = new RegExp(`^[${SPINNERS}]`);
 
@@ -118,6 +138,8 @@ function stripBottomChrome(lines) {
 export function parseConversation(rawText) {
   const clean = stripAnsi(rawText);
   let rawLines = clean.split("\n");
+  const quota = terminalQuotaFailure(clean);
+  if (quota) rawLines = rawLines.slice(0, quota.start);
 
   rawLines = stripStartupBanners(rawLines);
   rawLines = stripBottomChrome(rawLines);
@@ -401,6 +423,7 @@ export function parseConversation(rawText) {
 
   flushGroup();
 
+  if (quota) finalBlocks.push({ type: "notice", tone: "error", text: quota.text });
   return finalBlocks;
 }
 

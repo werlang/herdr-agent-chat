@@ -36,6 +36,7 @@ import {
 } from "herdr";
 import {
   parseConversation,
+  terminalQuotaFailure,
   spliceHistory,
   toolGroupSummaryKind,
   summarizeToolGroup,
@@ -638,6 +639,7 @@ export default class AgentChat extends View {
     this.transcript = null;
     this.setBlocks(this.historyCache.get(address) || []);
     this.rawText = this.rawHistoryCache.get(address) || "";
+    this._transcriptQuota = null;
     this._screenAt = 0;
     this._readFor = null;
     this._signature = "";
@@ -721,6 +723,7 @@ export default class AgentChat extends View {
         this.terminalMetaCache.set(this.terminal, createdMs);
         this.historyCache.delete(this.terminal);
         this.rawHistoryCache.delete(this.terminal);
+        this._transcriptQuota = null;
         this.transcript = null;
       }
       if (agentApp(findAgent(this.terminal))) this.refreshModels(cx);
@@ -736,7 +739,10 @@ export default class AgentChat extends View {
       if (res.code !== 0 || !res.stdout) return;
       const data = JSON.parse(res.stdout);
       const liveAgent = findAgent(this.terminal);
-      const newStatus = data.why || liveAgent?.status || "idle";
+      const reportedStatus = data.why || liveAgent?.status || "idle";
+      const newStatus = reportedStatus === "blocked" && terminalQuotaFailure(data.text)
+        ? "error"
+        : reportedStatus;
       if (this._lastText === data.text && this.status === newStatus) return;
       if (gen !== this._generation) return;
       this._lastText = data.text;
@@ -797,12 +803,13 @@ export default class AgentChat extends View {
     if (gen !== undefined && gen !== this._generation) return true;
     if (!result) return false;
 
-    // Until a transcript names its model, read the terminal screen slowly.
-    if (!this.transcript.model) {
+    // Antigravity can report a quota failure only on its current screen.
+    const isAntigravity = this.transcript instanceof AntigravityTranscript;
+    if (!this.transcript.model || isAntigravity) {
       const now = Date.now();
       if (!this._screenAt || now - this._screenAt > 3000) {
         this._screenAt = now;
-        const res = await hc(["read", this.terminal, "--lines", "60", "--json"]);
+        const res = await hc(["read", this.terminal, "--lines", isAntigravity ? "0" : "60", "--json"]);
         if (gen !== undefined && gen !== this._generation) return true;
         if (res.code === 0 && res.stdout) {
           const text = JSON.parse(res.stdout)?.text || "";
@@ -814,12 +821,29 @@ export default class AgentChat extends View {
       }
     }
 
-    const nextStatus = live?.status || "idle";
+    const reportedStatus = findAgent(this.terminal)?.status || "idle";
+    const quota = isAntigravity && reportedStatus !== "working" ? terminalQuotaFailure(this.rawText) : null;
+    // A quota failure can appear only on the screen, before the transcript
+    // or the agent status reflects it.
+    const nextStatus = quota && reportedStatus === "blocked" ? "error" : reportedStatus;
+    const quotaText = quota?.text ?? null;
+    const quotaChanged = quotaText !== this._transcriptQuota;
+    this._transcriptQuota = quotaText;
     const first = this._signature === "";
-    if (!result.changed && !first && nextStatus === this.status) return true;
+    if (!result.changed && !first && !quotaChanged && nextStatus === this.status) return true;
     this.status = nextStatus;
-    if (result.changed || first) this.applyBlocks(assignKeys(result.blocks, this.blocks), cx);
-    else this.applyBlocks(this.blocks, cx);
+    let blocks = result.blocks;
+    if (quota) {
+      const lastUser = blocks.findLastIndex((block) => block.type === "user");
+      const hasQuotaNotice = blocks.slice(lastUser + 1).some(
+        (block) => block.type === "notice" && block.text?.includes(quota.text)
+      );
+      if (!hasQuotaNotice) blocks = [...blocks, { type: "notice", tone: "error", text: quota.text }];
+    }
+    const keyed = assignKeys(blocks, this.blocks);
+    this.historyCache.delete(this.terminal);
+    this.historyCache.set(this.terminal, keyed);
+    this.applyBlocks(keyed, cx);
     return true;
   }
 
