@@ -352,3 +352,14 @@ test("extractOpenCodeSessionId reads both object-keyed and array records", () =>
   assert.equal(extractOpenCodeSessionId(null), null);
   assert.equal(extractOpenCodeSessionId({}), null);
 });
+
+test("buildOpenCodePollQuery matches ellipsized terminal titles by prefix", () => {
+  const qEllipsis = buildOpenCodePollQuery({ title: "Benefícios de mergear feat/agents-plu…" });
+  assert.match(qEllipsis, /title like 'Benefícios de mergear feat\/agents-plu%' escape '\\'/);
+
+  const qDots = buildOpenCodePollQuery({ title: "Fix 100%_bug..." });
+  assert.match(qDots, /title like 'Fix 100\\%\\_bug%' escape '\\'/);
+
+  const qExact = buildOpenCodePollQuery({ title: "Exact title" });
+  assert.match(qExact, /title = 'Exact title'/);
+});

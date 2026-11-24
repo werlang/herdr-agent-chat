@@ -26,6 +26,22 @@ export function extractOpenCodeSessionId(records) {
 }
 
 /**
+ * Builds a SQLite title predicate. Terminal titles are often ellipsized
+ * ("OC | Benefícios de mergear feat/agents-plu…"), so a trailing `…` or `...`
+ * matches by prefix instead of exact equality.
+ * @param {string} title
+ * @returns {string}
+ */
+function titleClause(title) {
+  const truncated = title.match(/^(.*?)(?:…|\.\.\.)$/);
+  if (truncated && truncated[1].trim()) {
+    const escaped = truncated[1].replace(/[\\%_]/g, "\\$&");
+    return `title like ${q(`${escaped}%`)} escape '\\'`;
+  }
+  return `title = ${q(title)}`;
+}
+
+/**
  * Lowercases and collapses whitespace so TUI labels and catalogue names
  * compare the same way.
  * @param {unknown} value
@@ -299,7 +315,7 @@ export function buildOpenCodePollQuery({
     ? `id = ${q(sessionId)}`
     : [
         "parent_id is null",
-        title ? `title = ${q(title)}` : null,
+        title ? titleClause(title) : null,
         !title && cwd ? `directory = ${q(cwd)}` : null,
         !title && minCreated > 0 ? `time_created >= ${minCreated}` : null,
       ]
