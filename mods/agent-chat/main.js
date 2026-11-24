@@ -2241,9 +2241,9 @@ export default class AgentChat extends View {
               .px(14)
               .py(10)
               .rounded(16)
-              .bg(t.raised)
+              .bg(withAlpha(t.accent, "2e"))
               .border_1()
-              .border_color(withAlpha(t.border, "70"))
+              .border_color(withAlpha(t.accent, "80"))
               .cursor_pointer()
               .child(
                 div()
