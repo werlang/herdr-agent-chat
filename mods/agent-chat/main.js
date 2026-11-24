@@ -2815,25 +2815,84 @@ export default class AgentChat extends View {
           );
       }
       case "code": {
-        const lines = (block.text || "").split("\n");
+        const codeText = block.text || "";
+        const lines = codeText.split("\n");
+        const codeKey = `${path}.code`;
+        const copied = this.copiedKey === codeKey;
+        // A code block is its own copy unit: the copy control and a secondary
+        // click both take the snippet, not the whole reply around it. Inside
+        // the block's horizontal scroller the row's secondary-click handler is
+        // not guaranteed to run, so the handler lives on the block itself.
+        const copyCode = (cx) => {
+          if (!codeText) return;
+          cx.stop_propagation();
+          this.copy(codeText, codeKey, cx);
+        };
         return v_flex()
           .w_full()
           .rounded(8)
           .bg(t.raised)
           .border_1()
           .border_color(withAlpha(t.border, "70"))
-          .p(12)
-          .overflow_x_scroll()
-          .when(Boolean(block.lang), (el) =>
-            el.child(div().pb(4).font_family(monoFont).text_size(10.5).text_color(t.dim).child(block.lang))
+          .overflow_hidden()
+          .on_mouse_down("right", (_e, cx) => copyCode(cx))
+          .child(
+            h_flex()
+              .w_full()
+              .items_center()
+              .gap(8)
+              .px(10)
+              .pt(8)
+              .pb(2)
+              .when(Boolean(block.lang), (el) =>
+                el.child(
+                  div()
+                    .font_family(monoFont)
+                    .text_size(10.5)
+                    .text_color(t.dim)
+                    .child(block.lang)
+                )
+              )
+              .child(
+                h_flex()
+                  .id(`code-copy-${codeKey}`)
+                  .flex_none()
+                  .items_center()
+                  .gap(4)
+                  .px(6)
+                  .py(2)
+                  .rounded(4)
+                  .cursor_pointer()
+                  .hover((s) => s.bg(t.hover))
+                  .on_click((_e, cx) => copyCode(cx))
+                  .child(
+                    svg(copied ? "mods/agent-chat/icons/check.svg" : "mods/agent-chat/icons/copy.svg")
+                      .size(11)
+                      .text_color(copied ? t.done : t.dim)
+                  )
+                  .child(
+                    div()
+                      .text_size(10.5)
+                      .text_color(copied ? t.done : t.dim)
+                      .child(copied ? "Copied" : "Copy")
+                  )
+              )
           )
           .child(
             v_flex()
-              .font_family(monoFont)
-              .text_size(12.5)
-              .line_height("19px")
-              .text_color(t.foreground)
-              .children(lines.map((line) => div().whitespace_nowrap().child(line === "" ? " " : line)))
+              .w_full()
+              .px(10)
+              .pb(10)
+              .items_start()
+              .overflow_x_scroll()
+              .child(
+                v_flex()
+                  .font_family(monoFont)
+                  .text_size(12.5)
+                  .line_height("19px")
+                  .text_color(t.foreground)
+                  .children(lines.map((line) => div().whitespace_nowrap().child(line === "" ? " " : line)))
+              )
           );
       }
       case "image":
@@ -4480,7 +4539,7 @@ export default class AgentChat extends View {
               .flex_none()
               .text_size(11)
               .text_color(this.notice ? t.accent : t.dim)
-              .child(this.notice || "Enter to send · Shift+Enter newline · Right-click a message to copy")
+              .child(this.notice || "Enter to send · Shift+Enter newline · Right-click to copy")
           )
       );
   }
