@@ -3234,6 +3234,11 @@ export default class AgentChat extends View {
   currentModelInfo() {
     const agent = findAgent(this.terminal);
     const app = agentApp(agent);
+    if (app === "codex") {
+      const state = this.currentCodexModelInfo();
+      const known = this.codexModels.find((m) => m.slug === state?.model);
+      return { model: known?.display_name || state?.model || null, effort: effortLabel(state?.effort) };
+    }
     if (app === "claude-code") {
       const seen = parseScreenModel(this.rawText, "claude-code");
       const tr = this.transcript instanceof ClaudeTranscript && this.transcript.terminal === this.terminal
@@ -3247,24 +3252,6 @@ export default class AgentChat extends View {
         model: pendingModel || claudeModelLabel(tr?.model, this.claudeModels) || seen?.model || null,
         effort: effortLabel(pending?.effort || tr?.effort || seen?.effort),
       };
-    }
-    if (app === "opencode") {
-      const tr = this.transcript instanceof OpenCodeTranscript && this.transcript.terminal === this.terminal
-        ? this.transcript
-        : null;
-      const known = this.currentOpenCodeModel();
-      const seen = parseScreenModel(this.rawText, "opencode");
-      // Before the first session row exists the TUI footer is the only
-      // source; it names the model as "<name> <provider>", so resolve it
-      // against the catalogue instead of showing the raw label.
-      const model = known?.name || tr?.modelLabel || seen?.model || null;
-      if (!model) return { model: null, effort: null };
-      return { model, effort: effortLabel(tr?.effort || seen?.effort) };
-    }
-    if (app === "codex") {
-      const state = this.currentCodexModelInfo();
-      const known = this.codexModels.find((m) => m.slug === state?.model);
-      return { model: known?.display_name || state?.model || null, effort: effortLabel(state?.effort) };
     }
     if (app === "antigravity" || app === "agy") {
       const tr = this.transcript instanceof AntigravityTranscript && this.transcript.terminal === this.terminal
@@ -3306,6 +3293,19 @@ export default class AgentChat extends View {
       }
       return { model: null, effort: null };
     }
+    if (app === "opencode") {
+      const tr = this.transcript instanceof OpenCodeTranscript && this.transcript.terminal === this.terminal
+        ? this.transcript
+        : null;
+      const known = this.currentOpenCodeModel();
+      const seen = parseScreenModel(this.rawText, "opencode");
+      // Before the first session row exists the TUI footer is the only
+      // source; it names the model as "<name> <provider>", so resolve it
+      // against the catalogue instead of showing the raw label.
+      const model = known?.name || tr?.modelLabel || seen?.model || null;
+      if (!model) return { model: null, effort: null };
+      return { model, effort: effortLabel(tr?.effort || seen?.effort) };
+    }
     const seen = parseScreenModel(this.rawText, app || "");
     return { model: seen?.model || null, effort: effortLabel(seen?.effort) };
   }
@@ -3339,6 +3339,14 @@ export default class AgentChat extends View {
     this.modelSearch?.set_value("");
   }
 
+  /** Switches Antigravity's model optimistically and sends `/model <id>`. */
+  switchAntigravityModel(targetId, cx) {
+    if (this.terminal && targetId) {
+      this.agyPendingModel = { terminal: this.terminal, id: targetId, at: Date.now() };
+    }
+    this.chooseModel(`/model ${targetId}`, cx);
+  }
+
   /** Closes the picker and prevents its terminal command from consuming an attached image. */
   beginModelSelection(cx) {
     this.closeModelMenu();
@@ -3354,14 +3362,6 @@ export default class AgentChat extends View {
       return false;
     }
     return true;
-  }
-
-  /** Switches Antigravity's model optimistically and sends `/model <id>`. */
-  switchAntigravityModel(targetId, cx) {
-    if (this.terminal && targetId) {
-      this.agyPendingModel = { terminal: this.terminal, id: targetId, at: Date.now() };
-    }
-    this.chooseModel(`/model ${targetId}`, cx);
   }
 
   /** Remembers a Claude `/model` or `/effort` choice so the UI shows it before the transcript confirms. */
@@ -3644,8 +3644,8 @@ export default class AgentChat extends View {
     const currentClaudeRawId =
       (isClaude && this.activeClaudePending()?.model) ||
       (this.transcript instanceof ClaudeTranscript && this.transcript.terminal === this.terminal
-          ? this.transcript.model
-          : null);
+        ? this.transcript.model
+        : null);
     const currentClaudeModel = isClaude
       ? this.claudeModels.find(
           (m) =>
@@ -3769,15 +3769,15 @@ export default class AgentChat extends View {
       modelRows = agyFamilies
         .filter((fam) => matchesModelQuery(searchQuery, [fam.label, fam.id, ...Object.values(fam.variants)]))
         .map((fam) => {
-        const curEff = (currentEffort || currentAgyParsed?.effort || "medium").toLowerCase();
-        const targetId = fam.variants[curEff] || fam.variants.medium || fam.variants.default || Object.values(fam.variants)[0] || fam.id;
-        return row(
-          `model-${fam.id}`,
-          fam.label,
-          "",
-          Boolean(currentAgyFamily && currentAgyFamily.id === fam.id),
-          (_e, cx) => this.switchAntigravityModel(targetId, cx)
-        );
+          const curEff = (currentEffort || currentAgyParsed?.effort || "medium").toLowerCase();
+          const targetId = fam.variants[curEff] || fam.variants.medium || fam.variants.default || Object.values(fam.variants)[0] || fam.id;
+          return row(
+            `model-${fam.id}`,
+            fam.label,
+            "",
+            Boolean(currentAgyFamily && currentAgyFamily.id === fam.id),
+            (_e, cx) => this.switchAntigravityModel(targetId, cx)
+          );
         });
     } else if (isAntigravity) {
       modelRows = [
@@ -4051,6 +4051,7 @@ export default class AgentChat extends View {
     const pendingSteers = this.currentPendingSteers();
     const pendingTotal = pendingSteers.length + queued.length;
     const isQueueMode = this.sendMode === "queue";
+
     const currentModelInfo = this.currentModelInfo();
 
     return v_flex()
