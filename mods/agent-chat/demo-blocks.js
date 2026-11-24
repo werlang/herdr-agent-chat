@@ -230,7 +230,7 @@ export function demoItems(style = "opencode", part = null) {
       ...worked,
     },
     { type: "assistant", text: showcase, seq: 2, ...turn(2) },
-    { type: "notice", tone: "info", text: "Model switched to big-pickle · max", seq: 3, ...turn(3) },
+    { type: "notice", tone: "info", text: "Model switched to Claude Opus 5.5 · high", seq: 3, ...turn(3) },
     { type: "user", text: "And what happens when the provider fails?" },
     {
       type: "assistant",
