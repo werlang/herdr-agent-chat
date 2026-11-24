@@ -1154,7 +1154,7 @@ export default class AgentChat extends View {
       try {
         await hc(["keys", terminal, "pageup"]).catch(() => {});
         this._cliPageUps = (this._cliPageUps || 0) + 1;
-        await new Promise((r) => setTimeout(r, 180));
+        await new Promise((resolve) => cx.timer.after(180, resolve));
         if (switchGen !== this._switchGen || this.terminal !== terminal) return;
 
         const nextLines = Math.min(4000, (this._cliLines || 0) + 80);
