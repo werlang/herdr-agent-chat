@@ -1282,8 +1282,8 @@ export function parseCodexModelsResponse(stdout) {
         return data
           .filter((m) => m && !m.hidden && (m.id || m.model))
           .map((m) => ({
-            slug: m.id || m.model,
-            display_name: m.displayName || m.id || m.model,
+            slug: m.model || m.id,
+            display_name: m.displayName || m.model || m.id,
             description: m.description || "",
             default_reasoning_level: m.defaultReasoningEffort
               ? String(m.defaultReasoningEffort).toLowerCase()

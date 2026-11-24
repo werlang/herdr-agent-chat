@@ -70,6 +70,7 @@ import { pickBodyFont } from "./body-font.js";
 import { ClaudeTranscript } from "./claude-transcript.js";
 import { OpenCodeTranscript } from "./opencode-transcript.js";
 import { CodexTranscript } from "./codex-transcript.js";
+import { applyCodexModel, codexAppServerVersion, codexModelEffort, codexScreenModel, codexSupportsInlineModel } from "./codex-model-picker.js";
 import { resolveOpenCodeModel } from "./opencode-data.js";
 import { AntigravityTranscript } from "./antigravity-transcript.js";
 
@@ -691,7 +692,12 @@ export default class AgentChat extends View {
         const text = JSON.parse(res.stdout)?.text || "";
         if (!text) return;
         this._screenAt = Date.now();
-        if (text !== this.rawText) {
+        if (app === "codex") {
+          if (this.codexModelScreen?.terminal !== terminal || text !== this.codexModelScreen.text) {
+            this.codexModelScreen = { terminal, text };
+            cx.notify();
+          }
+        } else if (text !== this.rawText) {
           this.rawText = text;
           cx.notify();
         }
@@ -876,17 +882,21 @@ export default class AgentChat extends View {
       }
     }
 
-    // Antigravity can report a quota failure only on its current screen.
+    // Codex and Antigravity can change their model and effort between transcript turns.
+    const isCodex = this.transcript instanceof CodexTranscript;
     const isAntigravity = this.transcript instanceof AntigravityTranscript;
-    if (!this.transcript.model || isAntigravity) {
+    if ((!this.transcript.model || isCodex || isAntigravity) && !this.codexSwitching) {
       const now = Date.now();
       if (!this._screenAt || now - this._screenAt > 3000) {
         this._screenAt = now;
-        const res = await hc(["read", this.terminal, "--lines", isAntigravity ? "0" : "60", "--json"]);
+        const res = await hc(["read", this.terminal, "--lines", isCodex || isAntigravity ? "0" : "60", "--json"]);
         if (gen !== undefined && gen !== this._generation) return true;
         if (res.code === 0 && res.stdout) {
           const text = JSON.parse(res.stdout)?.text || "";
-          if (text !== this.rawText) {
+          if (isCodex && (this.codexModelScreen?.terminal !== this.terminal || text !== this.codexModelScreen.text)) {
+            this.codexModelScreen = { terminal: this.terminal, text };
+            cx.notify();
+          } else if (!isCodex && text !== this.rawText) {
             this.rawText = text;
             cx.notify();
           }
@@ -3216,16 +3226,9 @@ export default class AgentChat extends View {
       return { model, effort: effortLabel(tr?.effort || seen?.effort) };
     }
     if (app === "codex") {
-      const tr = this.transcript instanceof CodexTranscript && this.transcript.terminal === this.terminal
-        ? this.transcript
-        : null;
-      if (tr?.model) {
-        const known = this.codexModels.find((m) => m.slug === tr.model);
-        return {
-          model: known?.display_name || tr.model,
-          effort: effortLabel(tr.effort || known?.default_reasoning_level),
-        };
-      }
+      const state = this.currentCodexModelInfo();
+      const known = this.codexModels.find((m) => m.slug === state?.model);
+      return { model: known?.display_name || state?.model || null, effort: effortLabel(state?.effort) };
     }
     if (app === "antigravity" || app === "agy") {
       const tr = this.transcript instanceof AntigravityTranscript && this.transcript.terminal === this.terminal
@@ -3271,6 +3274,24 @@ export default class AgentChat extends View {
     return { model: seen?.model || null, effort: effortLabel(seen?.effort) };
   }
 
+  /** Returns the current Codex terminal snapshot without reading another terminal’s cache. */
+  currentCodexScreen() {
+    return this.codexModelScreen?.terminal === this.terminal ? this.codexModelScreen.text : this.rawText;
+  }
+
+  /** Uses the live Codex state because the transcript reflects the last turn. */
+  currentCodexModelInfo() {
+    const screen = this.currentCodexScreen();
+    const live = codexScreenModel(screen, this.codexModels);
+    if (live) return live;
+    const tr = this.transcript;
+    if (tr instanceof CodexTranscript && tr.terminal === this.terminal && tr.model) {
+      const known = this.codexModels.find((m) => m.slug === tr.model);
+      return { model: tr.model, effort: tr.effort || known?.default_reasoning_level || null };
+    }
+    return parseScreenModel(screen, "codex");
+  }
+
   /** The model's display name, or null when it cannot be told. */
   currentModel() {
     return this.currentModelInfo().model;
@@ -3280,6 +3301,23 @@ export default class AgentChat extends View {
   closeModelMenu() {
     this.modelMenuOpen = false;
     this.modelSearch?.set_value("");
+  }
+
+  /** Closes the picker and prevents its terminal command from consuming an attached image. */
+  beginModelSelection(cx) {
+    this.closeModelMenu();
+    cx.notify();
+    if (!this.terminal || this.codexSwitching) return false;
+    if (this.attached > 0) {
+      this.notice = "Send or clear the attached image before switching models.";
+      cx.notify();
+      cx.timer.after(4000, (cx) => {
+        this.notice = null;
+        cx.notify();
+      });
+      return false;
+    }
+    return true;
   }
 
   /** Switches Antigravity's model optimistically and sends `/model <id>`. */
@@ -3316,59 +3354,47 @@ export default class AgentChat extends View {
   }
 
   /**
-   * Drives Codex CLI's interactive `/model` picker on the terminal screen.
-   * @param {string} slug
+   * Applies a session-only Codex choice using the inline `/model` command.
+   * @param {object} model Codex app-server catalogue entry
    * @param {string|null} effort
    * @param {any} cx
+   * @param {boolean} [effortOnly=false] Keep the model already selected in Codex.
    */
-  switchCodexModel(slug, effort, cx) {
-    this.modelMenuOpen = false;
-    cx.notify();
-    if (!this.terminal || !slug) return;
-    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  switchCodexModel(model, effort, cx, effortOnly = false) {
+    if (!this.beginModelSelection(cx)) return;
+    const terminal = this.terminal;
+    const models = this.codexModels;
+    this.codexSwitching = true;
     cx.spawn(async (cx) => {
       try {
-        await this.sendTextToTerminal("/model");
-        await wait(350);
-        const menuRes = await hc(["read", this.terminal, "--lines", "40", "--json"]);
-        const menuText = menuRes.code === 0 ? JSON.parse(menuRes.stdout)?.text || "" : "";
-        let picked = null;
-        for (const raw of menuText.split("\n")) {
-          const m = raw.match(/^\s*(?:›\s*)?(\d+)\.\s+([^\s(]+)/);
-          if (m && m[2].toLowerCase() === slug.toLowerCase()) {
-            picked = m[1];
-            break;
-          }
+        const text = await applyCodexModel({
+          model,
+          models,
+          effort,
+          effortOnly,
+          wait: (ms) => new Promise((resolve) => cx.timer.after(ms, resolve)),
+          send: (command) => this.sendTextToTerminal(command, { terminal }),
+          read: async () => {
+            const res = await hcOrThrow(["read", terminal, "--lines", "0", "--json"]);
+            return JSON.parse(res.stdout)?.text || "";
+          },
+        });
+        if (this.terminal === terminal) {
+          this.codexModelScreen = { terminal, text };
+          await this.update(cx);
         }
-        if (!picked) {
-          await hcOrThrow(["keys", this.terminal, "escape"]);
-          throw new Error(`Model ${slug} not found in Codex /model menu`);
-        }
-        await hcOrThrow(["keys", this.terminal, picked]);
-        await wait(350);
-        const effRes = await hc(["read", this.terminal, "--lines", "30", "--json"]);
-        const effText = effRes.code === 0 ? JSON.parse(effRes.stdout)?.text || "" : "";
-        if (/Select Reasoning Level/i.test(effText)) {
-          const targetEffort = (effort || "medium").toLowerCase();
-          if (targetEffort === "max" || targetEffort === "ultra") {
-            await hcOrThrow(["keys", this.terminal, "5"]);
-            await wait(250);
-            await hcOrThrow(["keys", this.terminal, targetEffort === "max" ? "1" : "2"]);
-          } else {
-            const idx = { low: "1", medium: "2", high: "3", xhigh: "4" }[targetEffort] || "2";
-            await hcOrThrow(["keys", this.terminal, idx]);
-          }
-        }
-        await this.update(cx);
       } catch (err) {
-        this.flashNotice(err, cx);
+        if (this.terminal === terminal) this.flashNotice(err, cx);
+      } finally {
+        this.codexSwitching = false;
+        cx.notify();
       }
-      cx.notify();
     });
   }
 
   /** Discovers models and capabilities by running the active harness's own command. */
   refreshModels(cx, force = false) {
+    const terminal = this.terminal;
     if (this.modelsTerminal !== this.terminal) {
       this.modelsTerminal = this.terminal;
       this.modelsAt = 0;
@@ -3407,9 +3433,10 @@ export default class AgentChat extends View {
           const cmd =
             '(printf \'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"herdr","version":"1.0"}}}\\n{"jsonrpc":"2.0","method":"initialized"}\\n{"jsonrpc":"2.0","id":2,"method":"model/list","params":{}}\\n\'; sleep 0.5) | codex app-server 2>/dev/null';
           const res = await exec("sh", ["-lc", cmd], { on });
-          if (res.code === 0 && res.stdout) {
+          if (res.code === 0 && res.stdout && terminal === this.terminal) {
             const parsed = parseCodexModelsResponse(res.stdout);
             if (parsed.length > 0) this.codexModels = parsed;
+            this.codexCatalogueVersion = { terminal, value: codexAppServerVersion(res.stdout) };
           }
         } else if (app === "antigravity" || app === "agy") {
           const res = await exec("sh", ["-lc", "agy models 2>/dev/null"], { on });
@@ -3565,21 +3592,16 @@ export default class AgentChat extends View {
         ) || this.claudeModels[0] || null
       : null;
 
-    const currentCodexSlug =
-      this.transcript instanceof CodexTranscript && this.transcript.terminal === this.terminal
-        ? this.transcript.model
-        : this.codexModels.find((m) => m.display_name === currentModelName || m.slug === currentModelName)?.slug ||
-          this.codexModels[0]?.slug ||
-          null;
-    const currentCodexModel = isCodex
-      ? this.codexModels.find((m) => m.slug === currentCodexSlug) || null
-      : null;
+    const codexState = isCodex ? this.currentCodexModelInfo() : null;
+    const currentCodexModel = this.codexModels.find((m) => m.slug === codexState?.model);
+    const codexVersion = this.codexCatalogueVersion?.terminal === this.terminal ? this.codexCatalogueVersion.value : null;
+    const codexInline = isCodex && codexSupportsInlineModel(this.currentCodexScreen(), codexVersion);
 
     const totalModelCount = isClaude
       ? this.claudeModels.length
       : isOpenCode
       ? this.models.length
-      : isCodex
+      : codexInline
       ? this.codexModels.length
       : isAntigravity
       ? agyFamilies.length
@@ -3659,18 +3681,18 @@ export default class AgentChat extends View {
           );
         }
       }
-    } else if (isCodex && this.codexModels.length > 0) {
+    } else if (codexInline && this.codexModels.length > 0) {
       modelRows = this.codexModels
         .filter((m) => matchesModelQuery(searchQuery, [m.display_name, m.slug, m.description]))
         .map((m) =>
-        row(
-          `model-${m.slug}`,
-          m.display_name || m.slug,
-          m.description || "",
-          m.slug === currentCodexSlug,
-          (_e, cx) => this.switchCodexModel(m.slug, currentEffort?.toLowerCase() || m.default_reasoning_level || "medium", cx)
-        )
-      );
+          row(
+            `model-${m.slug}`,
+            m.display_name || m.slug,
+            m.description || "",
+            m.slug === currentCodexModel?.slug,
+            (_e, cx) => this.switchCodexModel(m, codexModelEffort(m, codexState?.effort), cx)
+          )
+        );
     } else if (isCodex) {
       modelRows = [
         row(
@@ -3728,7 +3750,7 @@ export default class AgentChat extends View {
     const claudeEfforts = isClaude && currentClaudeModel?.efforts?.length
       ? currentClaudeModel.efforts.map((id) => ({ id, label: effortLabel(id), note: null }))
       : [];
-    const codexEfforts = isCodex
+    const codexEfforts = codexInline
       ? (currentCodexModel?.supported_reasoning_levels || [])
           .map((l) => l?.effort)
           .filter(Boolean)
@@ -3756,7 +3778,7 @@ export default class AgentChat extends View {
       if (isOpenCode) {
         if (ocModel) this.switchOpenCodeModel(ocModel, cx, id === "default" ? null : id);
       } else if (isCodex) {
-        if (currentCodexSlug) this.switchCodexModel(currentCodexSlug, id, cx);
+        if (currentCodexModel) this.switchCodexModel(currentCodexModel, id, cx, true);
       } else if (isAntigravity && currentAgyFamily?.variants?.[id]) {
         this.switchAntigravityModel(currentAgyFamily.variants[id], cx);
       } else {

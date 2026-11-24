@@ -26,7 +26,7 @@ Instead of keeping agent sessions confined to raw terminal buffers, `agent-chat`
 - **Quick Approvals**: When an agent prompts for confirmation (`[y/N]` or permission checks), one-click action buttons (`Approve (Enter)`, `Yes (y)`, `No (n)`, `Cancel (Esc)`) trigger instant key events via `hc`.
 - **Antigravity quota errors**: A quota failure on the current terminal screen appears in the feed with the reset time. Approval buttons stay hidden while that failure is current, even if the reported status is still `blocked`.
 - **Two-Way Prompt Input & Stop Control**: A multi-line composer at the bottom delivers prompts via `hc send <terminal>` (Enter sends, Shift+Enter inserts a line break) and exposes a **Stop** button (`hc interrupt <terminal>`) while the agent is working.
-- **Real Model Picker**: Claude Code lists its models and effort levels; OpenCode's catalogue comes from its own server (`/api/model`), grouped by provider, and switching calls `POST /api/session/<id>/model` instead of asking you to switch to the terminal.
+- **Real Model Picker**: Claude Code lists its models and effort levels; OpenCode's catalogue comes from its own server (`/api/model`), grouped by provider, and switching calls `POST /api/session/<id>/model` instead of asking you to switch to the terminal. Codex lists models and reasoning levels from its app server. On Codex CLI 0.164.0 or newer, Agent Chat switches models with `/model <model> --reasoning=<level>` and changes effort alone with `/model --reasoning=<level>`. Older versions open the native `/model` menu.
 
 ## Requirements
 
