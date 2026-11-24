@@ -16,6 +16,7 @@ const {
   settingChange,
   stripHarnessXml,
   screenModel,
+  parseScreenModel,
   groupAntigravityModels,
   terminalMachine,
   terminalLocalAddress,
@@ -443,4 +444,76 @@ test("applyPrependAnchor shifts scrollY by exact real height delta so visible ro
   assert.equal(nextScrollY, 1390);
   // Item originally at y = 440px (screen y = 440 - 40 = 400px) is now at y = 1790px:
   assert.equal(440 + (newHeight - prevHeight) - nextScrollY, 400);
+});
+
+test("parseScreenModel reads real Antigravity, Codex, Claude, and OpenCode footers", () => {
+  assert.deepEqual(
+    parseScreenModel("esc to cancel                                              auto · Gemini 4 Neon · low", "antigravity"),
+    { model: "Gemini 4 Neon", effort: "low" }
+  );
+  assert.deepEqual(
+    parseScreenModel("? for shortcuts                                    accept-edits · Gemini 4 Neon · low", "agy"),
+    { model: "Gemini 4 Neon", effort: "low" }
+  );
+  assert.deepEqual(
+    parseScreenModel("auto · Gemini 4 Neon · high", "antigravity"),
+    { model: "Gemini 4 Neon", effort: "high" }
+  );
+  assert.deepEqual(
+    parseScreenModel("esc to cancel                                              auto · Orchestrator (Neon)", "antigravity"),
+    { model: "Orchestrator (Neon)", effort: null }
+  );
+  assert.deepEqual(
+    parseScreenModel("? for shortcuts                                    Gemini 3.8 Flash · medium", "antigravity"),
+    { model: "Gemini 3.8 Flash", effort: "medium" }
+  );
+
+  assert.deepEqual(
+    parseScreenModel("  GPT-6.2-Sol medium · ~/workspaces/node-aec · Analise o progresso da etapa", "codex"),
+    { model: "GPT-6.2-Sol", effort: "medium" }
+  );
+  assert.deepEqual(
+    parseScreenModel("  GPT-6.2-Sol medium · /home/workspaces/gladcode2 · Revisar WP1", "codex"),
+    { model: "GPT-6.2-Sol", effort: "medium" }
+  );
+  assert.deepEqual(
+    parseScreenModel("  GPT-6.1 Terra extra high · ~/project", "codex"),
+    { model: "GPT-6.1 Terra", effort: "xhigh" }
+  );
+  assert.deepEqual(
+    parseScreenModel("gpt-5.4 high · 100% left · ~/work", "codex"),
+    { model: "gpt-5.4", effort: "high" }
+  );
+
+  assert.deepEqual(
+    parseScreenModel("▐▛███▜▌  Opus 5.5 with medium effort · Claude Pro\n◉ xhigh · /effort", "claude-code"),
+    { model: "Opus 5.5", effort: "xhigh" }
+  );
+  assert.deepEqual(
+    parseScreenModel("Opus 5.5 · Claude Max", "claude-code"),
+    { model: "Opus 5.5", effort: null }
+  );
+  assert.deepEqual(
+    parseScreenModel("Sonnet 4.6 (1M context)", "claude-code"),
+    { model: "Sonnet 4.6", effort: null }
+  );
+
+  assert.deepEqual(
+    parseScreenModel("  ┃  Build auto · DeepSeek V4.1 Flash 1017 OpenCode Go · max", "opencode"),
+    { model: "DeepSeek V4.1 Flash 1017 OpenCode Go", effort: "max" }
+  );
+  assert.deepEqual(
+    parseScreenModel("  ┃  Build · DeepSeek V4.1 Flash 1017 OpenCode Go · max", "opencode"),
+    { model: "DeepSeek V4.1 Flash 1017 OpenCode Go", effort: "max" }
+  );
+  // A fresh TUI renders few lines and pads the rest of the screen with blanks;
+  // the footer must still be found outside the last 20 physical lines.
+  const freshScreen =
+    "  ┃  Ask anything…\n" +
+    "  ┃  Build auto · DeepSeek V4.1 Flash 1017 OpenCode Go · max\n" +
+    "\n".repeat(40);
+  assert.deepEqual(parseScreenModel(freshScreen, "opencode"), {
+    model: "DeepSeek V4.1 Flash 1017 OpenCode Go",
+    effort: "max",
+  });
 });

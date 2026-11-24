@@ -60,6 +60,7 @@ import {
   prependEarlierBlocks,
   preserveScrollOnResize,
   applyPrependAnchor,
+  parseScreenModel,
   needsInitialEarlierLoad,
 } from "./transcript-blocks.js";
 import { resolvePaneVisibility } from "./pane-visibility.js";
@@ -203,50 +204,6 @@ function toolActionIcon(action) {
     default:
       return "mods/agent-chat/icons/wrench.svg";
   }
-}
-
-/**
- * Claude Code's model and effort as its screen shows them: the welcome banner
- * ("Opus 5.5 with medium effort · Claude Pro") and the effort hint above the
- * input ("◉ xhigh · /effort"), which is the more current of the two.
- * @param {string} text
- * @returns {{model: string|null, effort: string|null}|null}
- */
-function claudeScreenModel(text) {
-  const lines = (text || "").split("\n");
-  let model = null;
-  let effort = null;
-  for (const line of lines) {
-    const banner = line.match(/[▐▛█▜▀▝▘\s]*(\S.*?)\s+with\s+(\w+)\s+effort\b/);
-    if (banner && !model) {
-      model = banner[1].trim();
-      effort = effort || banner[2].toLowerCase();
-    }
-    const hint = line.match(/(?:^|\s)\S\s+(minimal|low|medium|high|xhigh|max)\s+·\s+\/effort\s*$/);
-    if (hint) effort = hint[1];
-  }
-  return model || effort ? { model, effort } : null;
-}
-
-/**
- * The model an agent's own status line names, read from its screen:
- * OpenCode: "Build auto · DeepSeek V4.1 Flash OpenCode Go · max"
- * Antigravity: "? for shortcuts      Gemini 3.8 Flash · medium"
- */
-function screenModel(text) {
-  const lines = (text || "").split("\n").slice(-20).reverse();
-  for (const raw of lines) {
-    const line = raw.replace(/[│┃▏▕█▌▐|]/g, " ").trim();
-    // Codex footer: "gpt-5.4 high · 100% left · ~/path"
-    const codex = line.match(/^([a-z0-9][a-z0-9._-]+)(?:\s+(low|medium|high|xhigh|max|ultra))?\s+·\s+\d+%\s+left\b/i);
-    if (codex) return { model: codex[1].trim(), effort: codex[2]?.toLowerCase() || null };
-    // The mode may carry a word ("Build auto · …") or stand alone ("Build · …").
-    const mode = line.match(/(?:^|\s)(?:Build|Plan)(?:\s+[^\s·]+)?\s+·\s+(.+?)(?:\s+·\s+(\S+))?$/);
-    if (mode) return { model: mode[1].trim(), effort: mode[2] || null };
-    const tail = line.match(/\s{2,}(\S.*?)\s+·\s+(minimal|low|medium|high|xhigh|max|ultra)$/);
-    if (tail) return { model: tail[1].trim(), effort: tail[2] };
-  }
-  return null;
 }
 
 /**
@@ -560,6 +517,8 @@ export default class AgentChat extends View {
     // background spawns and timers so no tasks are left stranded on reload.
     if (checking()) return;
 
+    this.primeScreenModel(cx);
+
     // `props.open` ("model" | "agent") starts with that picker open, so it can
     // be looked at without a click.
     if (p?.open === "model") {
@@ -703,8 +662,32 @@ export default class AgentChat extends View {
     this._restoredScrollFor = null;
     this.returnToLive(cx);
     this.updateGitBranch();
-    this.refreshModels(cx);
+    this.primeScreenModel(cx);
     this.refreshLater(cx);
+  }
+
+  /**
+   * Immediately reads the terminal's visible screen and refreshes its model
+   * catalogue so the active CLI model appears on startup without waiting for a poll.
+   */
+  primeScreenModel(cx) {
+    if (checking() || this.demo || !this.terminal) return;
+    const terminal = this.terminal;
+    const app = agentApp(findAgent(terminal));
+    if (app) this.refreshModels(cx);
+    cx.spawn(async (cx) => {
+      try {
+        const res = await hc(["read", terminal, "--lines", app === "claude-code" ? "60" : "0", "--json"]);
+        if (this.terminal !== terminal || res.code !== 0 || !res.stdout) return;
+        const text = JSON.parse(res.stdout)?.text || "";
+        if (!text) return;
+        this._screenAt = Date.now();
+        if (text !== this.rawText) {
+          this.rawText = text;
+          cx.notify();
+        }
+      } catch (_e) {}
+    });
   }
 
   /**
@@ -3200,43 +3183,55 @@ export default class AgentChat extends View {
   currentModelInfo() {
     const agent = findAgent(this.terminal);
     const app = agentApp(agent);
-    if (this.transcript?.terminal === this.terminal) {
-      if (this.transcript instanceof ClaudeTranscript && app === "claude-code") {
-        // Before the first reply there is no model on record: read the banner.
-        const seen = claudeScreenModel(this.rawText);
+    if (app === "claude-code") {
+      const tr = this.transcript instanceof ClaudeTranscript && this.transcript.terminal === this.terminal
+        ? this.transcript
+        : null;
+      const seen = parseScreenModel(this.rawText, "claude-code");
+      return {
+        model: claudeModelLabel(tr?.model, this.claudeModels) || seen?.model || null,
+        effort: effortLabel(tr?.effort || seen?.effort),
+      };
+    }
+    if (app === "opencode") {
+      const tr = this.transcript instanceof OpenCodeTranscript && this.transcript.terminal === this.terminal
+        ? this.transcript
+        : null;
+      const known = this.models.find(
+        (m) => m.modelID === tr?.model && (!tr?.provider || m.providerID === tr.provider)
+      );
+      const seen = parseScreenModel(this.rawText, "opencode");
+      const model = known?.name || tr?.modelLabel || seen?.model || null;
+      if (!model) return { model: null, effort: null };
+      return { model, effort: effortLabel(tr?.effort || seen?.effort) };
+    }
+    if (app === "codex") {
+      const tr = this.transcript instanceof CodexTranscript && this.transcript.terminal === this.terminal
+        ? this.transcript
+        : null;
+      if (tr?.model) {
+        const known = this.codexModels.find((m) => m.slug === tr.model);
         return {
-          model: claudeModelLabel(this.transcript.model, this.claudeModels) || seen?.model || null,
-          effort: effortLabel(this.transcript.effort || seen?.effort),
-        };
-      }
-      if (this.transcript instanceof OpenCodeTranscript && app === "opencode") {
-        const known = this.models.find(
-          (m) =>
-            m.modelID === this.transcript.model &&
-            (!this.transcript.provider || m.providerID === this.transcript.provider)
-        );
-        const name = known?.name || this.transcript.modelLabel;
-        // A session with no messages yet has no model on record: read the TUI.
-        if (name) return { model: name, effort: effortLabel(this.transcript.effort) };
-      }
-      if (this.transcript instanceof CodexTranscript && app === "codex" && this.transcript.model) {
-        const known = this.codexModels.find((m) => m.slug === this.transcript.model);
-        return {
-          model: known?.display_name || this.transcript.model,
-          effort: effortLabel(this.transcript.effort || known?.default_reasoning_level),
-        };
-      }
-      if (this.transcript instanceof AntigravityTranscript && (app === "antigravity" || app === "agy") && this.transcript.model) {
-        const parsed = parseAntigravityModel(this.transcript.model);
-        const families = groupAntigravityModels(this.agyModels);
-        const fam = families.find((f) => f.id === parsed.familyId || f.id === this.transcript.model);
-        return {
-          model: fam?.label || prettyModel(parsed.familyId) || this.transcript.model,
-          effort: effortLabel(this.transcript.effort || parsed.effort),
+          model: known?.display_name || tr.model,
+          effort: effortLabel(tr.effort || known?.default_reasoning_level),
         };
       }
     }
-    const seen = screenModel(this.rawText);
+    if (app === "antigravity" || app === "agy") {
+      const tr = this.transcript instanceof AntigravityTranscript && this.transcript.terminal === this.terminal
+        ? this.transcript
+        : null;
+      if (tr?.model) {
+        const parsed = parseAntigravityModel(tr.model);
+        const families = groupAntigravityModels(this.agyModels);
+        const fam = families.find((f) => f.id === parsed.familyId || f.id === tr.model);
+        return {
+          model: fam?.label || prettyModel(parsed.familyId) || tr.model,
+          effort: effortLabel(tr.effort || parsed.effort),
+        };
+      }
+    }
+    const seen = parseScreenModel(this.rawText, app || "");
     return { model: seen?.model || null, effort: effortLabel(seen?.effort) };
   }
 

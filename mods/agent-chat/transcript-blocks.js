@@ -971,6 +971,100 @@ export function screenModel(rawText, app = "") {
   return claudeScreenModel(clean);
 }
 
+/**
+ * Parses `{ model, effort }` from a terminal screen capture across supported CLIs.
+ * @param {string} text
+ * @param {string} [app]
+ * @returns {{ model: string|null, effort: string|null }|null}
+ */
+export function parseScreenModel(text, app = "") {
+  if (!text) return null;
+  const clean = String(text).replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "");
+  const normalizedApp = String(app || "").toLowerCase();
+
+  const parseClaude = () => {
+    const lines = clean.split("\n");
+    let model = null;
+    let effort = null;
+    for (const line of lines) {
+      const bannerEffort = line.match(/[▐▛█▜▀▝▘▌\s]*(\S.*?)\s+with\s+(\w+)\s+effort\b/);
+      if (bannerEffort && !model) {
+        model = bannerEffort[1].trim();
+        effort = effort || bannerEffort[2].toLowerCase();
+      } else if (!model) {
+        const banner = line.match(/[▐▛█▜▀▝▘▌\s]*([A-Z][A-Za-z0-9 ._-]{1,36}?)(?:\s*\([^)]*\))?\s+·\s+Claude\b/);
+        if (banner) model = banner[1].trim();
+        else {
+          const ctx = line.match(/^\s*(?:Claude\s+)?((?:Opus|Sonnet|Haiku|Fable)\s+[0-9.]+)\s*(?:\(|·|$)/);
+          if (ctx) model = ctx[1].trim();
+        }
+      }
+      const hint = line.match(/(?:^|\s)\S\s+(minimal|low|medium|high|xhigh|max)\s+·\s+\/effort\s*$/);
+      if (hint) effort = hint[1];
+    }
+    return model || effort ? { model, effort } : null;
+  };
+
+  if (normalizedApp === "claude-code" || normalizedApp === "claude") {
+    return parseClaude();
+  }
+
+  // The tail of a terminal screen is mostly blank when the TUI has little
+  // content (a fresh agent), so blanks must not consume the window: the model
+  // footer sits at the end of the real content, not of the screen buffer.
+  const tailLines = clean
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .slice(-20)
+    .reverse();
+  const isCodexApp = normalizedApp === "codex" || !normalizedApp;
+  const isOpenCodeApp = normalizedApp === "opencode" || !normalizedApp;
+  const isAgyApp = normalizedApp === "antigravity" || normalizedApp === "agy" || !normalizedApp;
+
+  for (const raw of tailLines) {
+    const line = raw.replace(/[│┃▏▕█▌▐|]/g, " ").trim();
+    if (!line) continue;
+
+    if (isCodexApp) {
+      const codex = line.match(
+        /^([A-Za-z0-9][A-Za-z0-9 ._-]*?)(?:\s+(default|none|minimal|low|medium|high|xhigh|extra high|max|ultra))?\s+·\s+(?:\d+%\s+left\b|~\/|\/)/i
+      );
+      if (codex) {
+        const rawEffort = codex[2]?.toLowerCase() || null;
+        const effort =
+          rawEffort === "extra high"
+            ? "xhigh"
+            : rawEffort === "default" || rawEffort === "none"
+            ? null
+            : rawEffort;
+        return { model: codex[1].trim(), effort };
+      }
+    }
+
+    if (isOpenCodeApp) {
+      const mode = line.match(/(?:^|\s)(?:Build|Plan)(?:\s+[^\s·]+)?\s+·\s+(.+?)(?:\s+·\s+(\S+))?$/);
+      if (mode) {
+        return { model: mode[1].trim(), effort: mode[2]?.toLowerCase() || null };
+      }
+    }
+
+    if (isAgyApp) {
+      const agyMode = line.match(
+        /(?:^|\s{2,})(?:auto|default|accept-edits|plan)\s+·\s+([^·]+?)(?:\s+·\s+(minimal|low|medium|high|xhigh|max|ultra))?$/i
+      );
+      if (agyMode) {
+        return { model: agyMode[1].trim(), effort: agyMode[2]?.toLowerCase() || null };
+      }
+      const agyPlain = line.match(/\s{2,}([^·]+?)\s+·\s+(minimal|low|medium|high|xhigh|max|ultra)$/i);
+      if (agyPlain) {
+        return { model: agyPlain[1].trim(), effort: agyPlain[2].toLowerCase() };
+      }
+    }
+  }
+
+  return !normalizedApp ? parseClaude() : null;
+}
+
 const AGY_EFFORT_SUFFIX_RE = /-(low|medium|high|xhigh)$/i;
 
 /**
