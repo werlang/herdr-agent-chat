@@ -3546,7 +3546,7 @@ export default class AgentChat extends View {
       const current = this.transcript instanceof OpenCodeTranscript ? this.transcript.effort : null;
       variant = current && (model.variants || []).some((v) => v.id === current) ? current : null;
     }
-    this.modelMenuOpen = false;
+    this.closeModelMenu();
     cx.notify();
     const session =
       this.transcript instanceof OpenCodeTranscript && this.transcript.terminal === this.terminal
