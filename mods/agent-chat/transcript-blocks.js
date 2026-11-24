@@ -1320,6 +1320,24 @@ export function parseAntigravityModelsOutput(stdout) {
   return parsed;
 }
 
+/**
+ * Returns true if every whitespace-separated token in `query` appears in at
+ * least one of `fields` (case-insensitive). Empty queries match everything.
+ * @param {string} query
+ * @param {Array<string|null|undefined>} fields
+ * @returns {boolean}
+ */
+export function matchesModelQuery(query, fields) {
+  const q = String(query || "").trim().toLowerCase();
+  if (!q) return true;
+  const tokens = q.split(/\s+/);
+  const haystack = (fields || [])
+    .filter(Boolean)
+    .map((f) => String(f).toLowerCase())
+    .join(" ");
+  return tokens.every((tok) => haystack.includes(tok));
+}
+
 const MD_LIST_ITEM = /^( *)([-*+]|\d{1,9}[.)])( +)(.*)$/;
 const MD_FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})\s*([^\s`]*)/;
 const MD_HEADING = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/;

@@ -16,6 +16,7 @@ const {
   settingChange,
   stripHarnessXml,
   screenModel,
+  matchesModelQuery,
   parseScreenModel,
   groupAntigravityModels,
   terminalMachine,
@@ -474,6 +475,16 @@ test("groupAntigravityModels sorts efforts canonically and handles effort-less m
   assert.equal(grouped[0].label, "Gemini 4 Neon");
   assert.deepEqual(grouped[1].efforts, []);
   assert.equal(grouped[1].variants.default, "gemini-pro-orchestrator-neon");
+});
+
+test("matchesModelQuery filters case-insensitively across multiple tokens and fields", () => {
+  const fields = ["Claude Opus 5.5", "claude-opus-5-5", "Anthropic", "anthropic"];
+  assert.equal(matchesModelQuery("", fields), true);
+  assert.equal(matchesModelQuery("   ", fields), true);
+  assert.equal(matchesModelQuery("opus", fields), true);
+  assert.equal(matchesModelQuery("anthropic opus", fields), true);
+  assert.equal(matchesModelQuery("OPUS 5.5", fields), true);
+  assert.equal(matchesModelQuery("gemini opus", fields), false);
 });
 
 test("parseScreenModel reads real Antigravity, Codex, Claude, and OpenCode footers", () => {

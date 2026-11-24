@@ -12,7 +12,7 @@
 // load a page at a time. Only a bounded window of rows is built, so a long
 // session does not cost a full transcript render on every poll.
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, TextareaState, Textarea, TextView } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView } from "gpui-base";
 import {
   hc,
   exec,
@@ -61,6 +61,7 @@ import {
   preserveScrollOnResize,
   applyPrependAnchor,
   parseScreenModel,
+  matchesModelQuery,
   needsInitialEarlierLoad,
 } from "./transcript-blocks.js";
 import { resolvePaneVisibility } from "./pane-visibility.js";
@@ -78,6 +79,9 @@ const COLUMN = 760;
 /** Turns kept in the initial batch, and added per lazy-load batch. */
 const FEED_WINDOW = 8;
 const FEED_PAGE = 8;
+
+/** Show the model search input when more than this many models are available. */
+const MODEL_SEARCH_THRESHOLD = 6;
 
 /**
  * Installs app-wide keybindings for AgentChat once per process.
@@ -464,6 +468,9 @@ export default class AgentChat extends View {
 
     ensureAgentChatKeyBindings(cx);
     this.handle = cx.focus_handle();
+
+    this.modelSearch = InputState.new({ placeholder: "Search models…", value: "" });
+    this.modelSearch.on("change", (_e, cx) => cx.notify());
 
     this.input = TextareaState.new({ placeholder: "Ask anything…", value: "", rows: 1 });
     this.input.set_auto_grow(1, 8);
@@ -3269,6 +3276,12 @@ export default class AgentChat extends View {
     return this.currentModelInfo().model;
   }
 
+  /** Closes the model menu and clears any active search query. */
+  closeModelMenu() {
+    this.modelMenuOpen = false;
+    this.modelSearch?.set_value("");
+  }
+
   /** Switches Antigravity's model optimistically and sends `/model <id>`. */
   switchAntigravityModel(targetId, cx) {
     if (this.terminal && targetId) {
@@ -3562,23 +3575,40 @@ export default class AgentChat extends View {
       ? this.codexModels.find((m) => m.slug === currentCodexSlug) || null
       : null;
 
+    const totalModelCount = isClaude
+      ? this.claudeModels.length
+      : isOpenCode
+      ? this.models.length
+      : isCodex
+      ? this.codexModels.length
+      : isAntigravity
+      ? agyFamilies.length
+      : 0;
+    const showSearch = totalModelCount > MODEL_SEARCH_THRESHOLD;
+    const searchQuery = showSearch ? (this.modelSearch?.value() || "").trim() : "";
+
     /** @type {any[]} */
     let modelRows = [];
     if (isClaude && this.claudeModels.length > 0) {
-      modelRows = [
-        ...this.claudeModels.map((m) =>
-          row(
-            `model-${m.id}`,
-            m.label,
-            m.note,
-            m.id !== "default" && Boolean(currentClaudeModel && currentClaudeModel.id === m.id),
-            (_e, cx) => this.chooseModel(`/model ${m.id}`, cx)
+      const filtered = this.claudeModels.filter((m) =>
+        matchesModelQuery(searchQuery, [m.label, m.id, m.note])
+      );
+      modelRows = filtered.map((m) =>
+        row(
+          `model-${m.id}`,
+          m.label,
+          m.note,
+          m.id !== "default" && Boolean(currentClaudeModel && currentClaudeModel.id === m.id),
+          (_e, cx) => this.chooseModel(`/model ${m.id}`, cx)
+        )
+      );
+      if (!searchQuery) {
+        modelRows.push(
+          row("model-open-native", "More models…", "Open Claude Code's /model picker", false, (_e, cx) =>
+            this.chooseModel("/model", cx)
           )
-        ),
-        row("model-open-native", "More models…", "Open Claude Code's /model picker", false, (_e, cx) =>
-          this.chooseModel("/model", cx)
-        ),
-      ];
+        );
+      }
     } else if (isClaude) {
       modelRows = [
         row(
@@ -3604,13 +3634,16 @@ export default class AgentChat extends View {
       });
       const ocCurrent = this.currentOpenCodeModel();
       for (const provider of order) {
-        modelRows.push(
-          div().px(10).pt(6).pb(2).text_size(10.5).font_semibold().text_color(t.dim).child(providerName(provider))
-        );
+        const pName = providerName(provider);
         const entries = groups
           .get(provider)
+          .filter((m) => matchesModelQuery(searchQuery, [m.name, m.modelID, pName, provider]))
           .slice()
           .sort((a, b) => (a.name || a.modelID).localeCompare(b.name || b.modelID));
+        if (entries.length === 0) continue;
+        modelRows.push(
+          div().px(10).pt(6).pb(2).text_size(10.5).font_semibold().text_color(t.dim).child(pName)
+        );
         for (const m of entries) {
           const isCurrent = ocCurrent
             ? ocCurrent.providerID === m.providerID && ocCurrent.modelID === m.modelID
@@ -3627,7 +3660,9 @@ export default class AgentChat extends View {
         }
       }
     } else if (isCodex && this.codexModels.length > 0) {
-      modelRows = this.codexModels.map((m) =>
+      modelRows = this.codexModels
+        .filter((m) => matchesModelQuery(searchQuery, [m.display_name, m.slug, m.description]))
+        .map((m) =>
         row(
           `model-${m.slug}`,
           m.display_name || m.slug,
@@ -3647,7 +3682,9 @@ export default class AgentChat extends View {
         ),
       ];
     } else if (isAntigravity && agyFamilies.length > 0) {
-      modelRows = agyFamilies.map((fam) => {
+      modelRows = agyFamilies
+        .filter((fam) => matchesModelQuery(searchQuery, [fam.label, fam.id, ...Object.values(fam.variants)]))
+        .map((fam) => {
         const curEff = (currentEffort || currentAgyParsed?.effort || "medium").toLowerCase();
         const targetId = fam.variants[curEff] || fam.variants.medium || fam.variants.default || Object.values(fam.variants)[0] || fam.id;
         return row(
@@ -3657,7 +3694,7 @@ export default class AgentChat extends View {
           Boolean(currentAgyFamily && currentAgyFamily.id === fam.id),
           (_e, cx) => this.switchAntigravityModel(targetId, cx)
         );
-      });
+        });
     } else if (isAntigravity) {
       modelRows = [
         row(
@@ -3673,6 +3710,17 @@ export default class AgentChat extends View {
         row("model-open-native", "Open native model selector", `Run /models in ${agentName}`, false, (_e, cx) =>
           this.chooseModel("/models", cx)
         ),
+      ];
+    }
+
+    if (searchQuery && modelRows.length === 0) {
+      modelRows = [
+        div()
+          .px(10)
+          .py(12)
+          .text_size(12)
+          .text_color(t.dim)
+          .child(`No models match "${searchQuery}".`),
       ];
     }
 
@@ -3776,9 +3824,1597 @@ export default class AgentChat extends View {
               .p(8)
               .border_r(1)
               .border_color(t.border)
-              .overflow_y_scrollbar()
+                            .font_family(monoFont)
+                            .text_size(11)
+                            .text_color(t.dim)
+                            .when(this.hasFileEditor, (el) =>
+                              el
+                                .cursor_pointer()
+                                .hover((s) => s.bg(t.hover).text_color(t.foreground))
+                                .on_click((_e, cx) => {
+                                  cx.stop_propagation();
+                                  this.handleLinkClick(f, cx);
+                                })
+                            )
+                            .child(basename(f))
+                        )
+                      )
+                  )
+              )
+              // Only the confirmation: a "Right-click to copy" hint under every
+              // reply is noise, so the tip lives once in the composer footer.
+              .when(copied, (el) =>
+                el.child(
+                  h_flex()
+                    .items_center()
+                    .gap(4)
+                    .child(svg("mods/agent-chat/icons/check.svg").size(11).text_color(t.done))
+                    .child(div().text_size(11).text_color(t.done).child("Copied"))
+                )
+              )
+          )
+      );
+    }
+
+    const open = this.expanded.has(block.ekey);
+    const chevron = svg(open ? "mods/agent-chat/icons/chevron-down.svg" : "mods/agent-chat/icons/chevron-right.svg")
+      .size(11)
+      .text_color(t.dim);
+    const detailBox = (text) =>
+      div()
+        .w_full()
+        .mt(6)
+        .p(12)
+        .rounded(10)
+        .bg(t.raised)
+        .text_size(12)
+        .line_height("18px")
+        .font_family(monoFont)
+        .text_color(t.dim)
+        .child(text);
+    // Thinking is reasoning, not a reply: a bounded, scrollable panel, drawn
+    // dimmer than a reply. Its text is Markdown (models write `**headings**`),
+    // so it goes through the same renderer instead of showing raw asterisks.
+    // Every bounded panel is named: the feed is rebuilt on each poll and rows
+    // shift as turns arrive, so a panel identified only by its position would
+    // lose its scroll offset (or take another panel's) on the next repaint.
+    const thinkingBox = (text, id) =>
+      div()
+        .id(`${id}-scroll`)
+        .w_full()
+        .max_h(280)
+        .overflow_y_scrollbar()
+        .child(
+          div()
+            .w_full()
+            .mt(6)
+            .p(12)
+            .rounded(10)
+            .bg(t.raised)
+            .text_size(13)
+            .line_height("21px")
+            .text_color(t.dim)
+            .child(this.renderMarkdownBlocks(parseMarkdownBlocks(text || ""), t, monoFont, id))
+        );
+
+    if (block.type === "thought") {
+      const isRunning = block.status === "running";
+      const line = block.liveLine;
+      const label = isRunning
+        ? (line ? `Thinking — ${line}` : "Thinking…")
+        : (line ? `Thought · ${line}` : (block.duration ? `Thought for ${block.duration}` : "Thought"));
+
+      return column(
+        v_flex()
+          .w_full()
+          .py(4)
+          .child(
+            h_flex()
+              .w_full()
+              .min_w(0)
+              .items_center()
+              .gap(8)
+              .cursor_pointer()
+              .child(
+                svg("mods/agent-chat/icons/brain.svg")
+                  .size(13)
+                  .flex_none()
+                  .text_color(isRunning ? t.working : t.dim)
+              )
+              .child(div().flex_1().min_w(0).truncate().text_size(13).text_color(t.dim).child(label))
+              .child(chevron)
+          )
+          .when(open, (el) =>
+            el.child(
+              thinkingBox(block.text || block.summary || "", `think-${block.ekey}`)
+            )
+          )
+          .when(copied, (el) => el.child(copiedNote()))
+      );
+    }
+
+    // Errors, warnings, interruptions, model switches: distinct from assistant prose.
+    if (block.type === "notice") {
+      const tone = block.tone || "info";
+      const errColor = t.ansi1 || "#ef4444";
+      const warnColor = t.blocked || t.ansi3 || "#f59e0b";
+
+      if (tone === "warning" || tone === "error") {
+        const color = tone === "error" ? errColor : warnColor;
+        return column(
+          h_flex()
+            .w_full()
+            .items_start()
+            .gap(8)
+            .my(6)
+            .px(12)
+            .py(7)
+            .rounded(8)
+            .bg(withAlpha(color, "14"))
+            .border_1()
+            .border_color(withAlpha(color, "55"))
+            .child(svg("mods/agent-chat/icons/shield-alert.svg").size(13).flex_none().mt(2).text_color(color))
+            .child(
+              div()
+                .flex_1()
+                .min_w(0)
+                .font_family(monoFont)
+                .text_size(11.5)
+                .line_height("18px")
+                .text_color(color)
+                .child(block.text || "")
+            )
+        );
+      }
+
+      return column(
+        h_flex()
+          .w_full()
+          .items_center()
+          .gap(10)
+          .py(8)
+          .child(div().flex_1().h(1).bg(withAlpha(t.border, "80")))
+          .child(
+            h_flex()
+              .items_center()
+              .gap(6)
+              .px(10)
+              .py(2)
+              .rounded_full()
+              .bg(t.raised)
+              .border_1()
+              .border_color(t.border)
+              .child(svg("mods/agent-chat/icons/corner-up-right.svg").size(11).text_color(t.dim))
               .child(
                 div()
+                  .font_family(monoFont)
+                  .text_size(11)
+                  .text_color(t.dim)
+                  .child(block.text || "")
+              )
+          )
+          .child(div().flex_1().h(1).bg(withAlpha(t.border, "80")))
+      );
+    }
+
+    if (block.type === "tool") {
+      const action = block.action || "other";
+      const iconPath = toolActionIcon(action);
+      const isRunning = block.status === "running";
+      const isFailed = block.hasFailure || block.status === "error";
+      const errColor = t.ansi1 || "#ef4444";
+
+      return column(
+        v_flex()
+          .w_full()
+          .py(3)
+          .child(
+            h_flex()
+              .items_center()
+              .gap(8)
+              .min_w(0)
+              .cursor_pointer()
+              .child(
+                isRunning
+                  ? svg("mods/agent-chat/icons/refresh.svg").size(12).text_color(t.working)
+                  : svg(iconPath)
+                      .size(13)
+                      .text_color(isFailed ? errColor : t.dim)
+              )
+              .child(
+                div()
+                  .flex_1()
+                  .min_w(0)
+                  .truncate()
+                  .text_size(12.5)
+                  .font_family(monoFont)
+                  .text_color(isFailed ? errColor : t.dim)
+                  .child(block.title || "Tool call")
+              )
+              .when(Boolean(block.detail), (el) => el.child(chevron))
+          )
+          .when(open && Boolean(block.detail), (el) => el.child(detailBox(block.detail)))
+          .when(copied, (el) => el.child(copiedNote()))
+      );
+    }
+
+    if (block.type === "tool_group") {
+      const summaryKind = block.summaryKind || "mixed";
+      const iconPath = toolActionIcon(summaryKind);
+      const isRunning = block.status === "running";
+      const errColor = t.ansi1 || "#ef4444";
+      const failedCount = (block.tools || []).filter((x) => x.hasFailure || x.status === "error").length;
+      const summaryText = block.summary || `Used ${block.count} tools`;
+
+      return column(
+        v_flex()
+          .w_full()
+          .py(3)
+          .child(
+            h_flex()
+              .items_center()
+              .gap(8)
+              .min_w(0)
+              .cursor_pointer()
+              .child(
+                isRunning
+                  ? svg("mods/agent-chat/icons/refresh.svg").size(12).text_color(t.working)
+                  : svg(iconPath).size(13).text_color(t.dim)
+              )
+              .child(div().flex_none().text_size(13).text_color(t.foreground).child(summaryText))
+              .when(failedCount > 0, (el) =>
+                el.child(
+                  div()
+                    .flex_none()
+                    .px(6)
+                    .py(1)
+                    .rounded(4)
+                    .border_1()
+                    .border_color(withAlpha(errColor, "66"))
+                    .text_size(10.5)
+                    .text_color(errColor)
+                    .child(`${failedCount} failed`)
+                )
+              )
+              // Always fills the row, so the count and chevron sit at the right edge.
+              .child(
+                div()
+                  .flex_1()
+                  .min_w(0)
+                  .truncate()
+                  .text_size(12)
+                  .text_color(t.dim)
+                  .child(block.activity ? `· ${block.activity}` : "")
+              )
+              .when(block.count > 0, (el) =>
+                el.child(
+                  div()
+                    .px(5)
+                    .py(1)
+                    .rounded(4)
+                    .bg(t.raised)
+                    .text_size(10.5)
+                    .font_family(monoFont)
+                    .text_color(t.dim)
+                    .child(String(block.count))
+                )
+              )
+              .child(chevron)
+          )
+          .when(open, (el) =>
+            el.child(
+              v_flex()
+                .w_full()
+                .mt(6)
+                .pl(8)
+                .gap(4)
+                .border_l(2)
+                .border_color(withAlpha(t.border, "70"))
+                .children([
+                  ...(block.thoughts || [])
+                    .map((thought, thoughtIndex) => ({ thought, thoughtIndex }))
+                    .filter(({ thought }) => Boolean(thought.text))
+                    .map(({ thought, thoughtIndex }) => {
+                      // Like a tool call: one line, opens on its own.
+                      const thoughtKey = `${block.ekey}:thought${thoughtIndex}`;
+                      const thoughtOpen = this.expanded.has(thoughtKey);
+                      const line = liveThoughtLine(thought.text);
+                      const thinking = thought.status === "running";
+                      return v_flex()
+                        .w_full()
+                        .child(
+                          h_flex()
+                            .id(`thought-${thoughtKey}`)
+                            .items_center()
+                            .gap(8)
+                            .py(2)
+                            .cursor_pointer()
+                            .on_click((_e, cx) => {
+                              cx.stop_propagation();
+                              if (this.expanded.has(thoughtKey)) this.expanded.delete(thoughtKey);
+                              else this.expanded.add(thoughtKey);
+                              cx.notify();
+                            })
+                            .child(
+                              svg("mods/agent-chat/icons/brain.svg")
+                                .size(12)
+                                .text_color(thinking ? t.working : t.dim)
+                            )
+                            .child(
+                              div()
+                                .flex_1()
+                                .min_w(0)
+                                .truncate()
+                                .text_size(12)
+                                .text_color(t.dim)
+                                .child(
+                                  thinking
+                                    ? line ? `Thinking — ${line}` : "Thinking…"
+                                    : line ? `Thought · ${line}` : "Thought"
+                                )
+                            )
+                            .child(
+                              svg(
+                                thoughtOpen
+                                  ? "mods/agent-chat/icons/chevron-down.svg"
+                                  : "mods/agent-chat/icons/chevron-right.svg"
+                              )
+                                .size(11)
+                                .text_color(t.dim)
+                            )
+                        )
+                        .when(thoughtOpen, (el) =>
+                          el.child(thinkingBox(thought.text, `think-${thoughtKey}`))
+                        );
+                    }),
+                  ...block.tools.map((tool, toolIndex) => {
+                    // Each call opens on its own; output stays folded until asked for.
+                    const toolKey = `${block.ekey}:tool${toolIndex}`;
+                    const toolOpen = this.expanded.has(toolKey);
+                    return v_flex()
+                      .w_full()
+                      .child(
+                        h_flex()
+                          .id(`tool-${toolKey}`)
+                          .items_center()
+                          .gap(8)
+                          .py(2)
+                          .when(Boolean(tool.detail), (el) =>
+                            el.cursor_pointer().on_click((_e, cx) => {
+                              cx.stop_propagation();
+                              if (this.expanded.has(toolKey)) this.expanded.delete(toolKey);
+                              else this.expanded.add(toolKey);
+                              cx.notify();
+                            })
+                          )
+                          .child(
+                            tool.status === "running"
+                              ? svg("mods/agent-chat/icons/refresh.svg").size(11).text_color(t.working)
+                              : svg(toolActionIcon(tool.action || "other"))
+                                  .size(12)
+                                  .text_color(tool.status === "error" || tool.hasFailure ? errColor : t.dim)
+                          )
+                          .child(
+                            div()
+                              .flex_1()
+                              .min_w(0)
+                              .truncate()
+                              .text_size(12)
+                              .font_family(monoFont)
+                              .text_color(tool.status === "error" || tool.hasFailure ? errColor : t.dim)
+                              .child(tool.title || "Tool")
+                          )
+                          .when(Boolean(tool.detail), (el) =>
+                            el.child(
+                              svg(
+                                toolOpen
+                                  ? "mods/agent-chat/icons/chevron-down.svg"
+                                  : "mods/agent-chat/icons/chevron-right.svg"
+                              )
+                                .size(11)
+                                .text_color(t.dim)
+                            )
+                          )
+                      )
+                      .when(toolOpen && Boolean(tool.detail), (e) =>
+                        e.child(
+                          div()
+                            .id(`tool-scroll-${toolKey}`)
+                            .w_full()
+                            .max_h(240)
+                            .overflow_y_scrollbar()
+                            .child(detailBox(tool.detail))
+                        )
+                      );
+                  }),
+                ])
+            )
+          )
+          .when(copied, (el) => el.child(copiedNote()))
+      );
+    }
+
+    return div();
+  }
+
+  /**
+   * Opens external HTTP(S) URLs in the browser and internal file links/paths in `file-editor`.
+   * @param {string} url
+   * @param {any} cx
+   */
+  handleLinkClick(url, cx) {
+    if (!url || typeof url !== "string") return;
+    const trimmed = url.trim();
+    if (/^https?:\/\//i.test(trimmed)) {
+      cx.open_url(trimmed);
+      return;
+    }
+    if (!this.hasFileEditor) return;
+
+    const term = terminals().find((t) => t.address === this.terminal);
+    const activeSpace = spaces().find((s) => s.active);
+    const cwd = term?.cwd || activeSpace?.folder || "";
+    const resolved = resolveInternalFileLink(trimmed, cwd);
+    if (!resolved) return;
+
+    const on = terminalMachine(this.terminal) ?? activeSpace?.machine ?? null;
+    try {
+      const openTabs = shared("file-editor.openTabs") || {};
+      const fileKey = resolved.folder ? `${resolved.folder}/${resolved.file}` : resolved.file;
+      const existingTabId = openTabs[fileKey]?.tabId;
+      if (existingTabId && (activeSpace?.tabs || []).some((tab) => tab.id === existingTabId)) {
+        run("tab.select", { id: existingTabId });
+        return;
+      }
+
+      const tabProps = { folder: resolved.folder, file: resolved.file };
+      if (on) tabProps.on = on;
+      run("tab.new", { name: resolved.name, mod: "file-editor", props: tabProps });
+    } catch (_e) {}
+  }
+
+  /**
+   * Renders parsed Markdown blocks with real list indentation, headings, code blocks,
+   * blockquotes, and tables (since native TextView.markdown only renders inline runs).
+   */
+  renderMarkdownBlocks(blocks, t, monoFont, path, gap = 10, depth = 0) {
+    if (!blocks || blocks.length === 0) return div();
+    return v_flex()
+      .w_full()
+      .gap(gap)
+      .children(blocks.map((block, i) => this.renderMarkdownBlock(block, t, monoFont, `${path}.${i}`, depth)));
+  }
+
+  renderMarkdownBlock(block, t, monoFont, path, depth = 0) {
+    switch (block.type) {
+      case "heading": {
+        const sizes = { 1: 22, 2: 18, 3: 16, 4: 14.5, 5: 14, 6: 13.5 };
+        const sz = sizes[block.level] || 14;
+        return div()
+          .w_full()
+          .min_w(0)
+          .font_weight(600)
+          .text_size(sz)
+          .line_height(`${Math.round(sz * 1.35)}px`)
+          .text_color(block.level === 6 ? t.dim : t.foreground)
+          .when(block.level <= 2, (el) => el.border_b(1).border_color(withAlpha(t.border, "80")).pb(4))
+          .child(
+            TextView.markdown(path, block.text || "")
+              .selectable(true)
+              .on_link_click((url, cx) => this.handleLinkClick(url, cx))
+          );
+      }
+      case "paragraph": {
+        if (!block.text || !block.text.trim()) return div();
+        return div()
+          .w_full()
+          .min_w(0)
+          .text_size(14)
+          .line_height("22px")
+          .text_color(t.foreground)
+          .child(
+            TextView.markdown(path, block.text)
+              .selectable(true)
+              .on_link_click((url, cx) => this.handleLinkClick(url, cx))
+          );
+      }
+      case "code": {
+        const lines = (block.text || "").split("\n");
+        return v_flex()
+          .w_full()
+          .rounded(8)
+          .bg(t.raised)
+          .border_1()
+          .border_color(withAlpha(t.border, "70"))
+          .p(12)
+          .overflow_x_scroll()
+          .when(Boolean(block.lang), (el) =>
+            el.child(div().pb(4).font_family(monoFont).text_size(10.5).text_color(t.dim).child(block.lang))
+          )
+          .child(
+            v_flex()
+              .font_family(monoFont)
+              .text_size(12.5)
+              .line_height("19px")
+              .text_color(t.foreground)
+              .children(lines.map((line) => div().whitespace_nowrap().child(line === "" ? " " : line)))
+          );
+      }
+      case "image":
+        return this.renderImageRef({ alt: block.alt || "", src: block.src || "" }, t, monoFont);
+      case "hr":
+        return div().w_full().h(1).my(4).bg(withAlpha(t.border, "80"));
+      case "quote":
+        return h_flex()
+          .w_full()
+          .gap(12)
+          .child(div().w(3).h_full().flex_none().rounded(2).bg(t.dim))
+          .child(
+            div()
+              .flex_1()
+              .min_w(0)
+              .text_color(t.dim)
+              .child(this.renderMarkdownBlocks(block.blocks || [], t, monoFont, path, 8, depth))
+          );
+      case "list": {
+        const bullets = ["•", "◦", "▪"];
+        const bullet = bullets[depth % bullets.length];
+        return v_flex()
+          .w_full()
+          .gap(4)
+          .pl(8)
+          .children(
+            (block.items || []).map((item, i) => {
+              const marker =
+                item.checked !== null
+                  ? div()
+                      .w(14)
+                      .h(14)
+                      .mt(4)
+                      .flex_none()
+                      .rounded(3)
+                      .border_1()
+                      .border_color(item.checked ? t.accent : t.border)
+                      .when(item.checked, (el) =>
+                        el
+                          .bg(t.accent)
+                          .flex()
+                          .items_center()
+                          .justify_center()
+                          .child(div().text_size(10).text_color(t.background || "#fff").child("✓"))
+                      )
+                  : div()
+                      .w(block.ordered ? 22 : 12)
+                      .flex_none()
+                      .text_size(14)
+                      .line_height("22px")
+                      .text_color(t.dim)
+                      .child(block.ordered ? `${block.start + i}.` : bullet);
+              return h_flex()
+                .w_full()
+                .items_start()
+                .gap(6)
+                .child(marker)
+                .child(
+                  div()
+                    .flex_1()
+                    .min_w(0)
+                    .child(this.renderMarkdownBlocks(item.blocks || [], t, monoFont, `${path}.${i}`, 4, depth + 1))
+                );
+            })
+          );
+      }
+      case "table": {
+        const cols = Math.max(1, (block.header || []).length);
+        const renderTableRow = (cells, rowIdx, isHeader) =>
+          h_flex()
+            .w_full()
+            .when(isHeader, (el) => el.bg(t.raised))
+            .when(!isHeader && rowIdx > 1, (el) => el.border_t(1).border_color(t.border))
+            .children(
+              Array.from({ length: cols }, (_, c) => {
+                const align = block.align?.[c] || "left";
+                const content = cells[c] ?? "";
+                return div()
+                  .flex_1()
+                  .min_w(0)
+                  .px(10)
+                  .py(5)
+                  .when(c < cols - 1, (el) => el.border_r(1).border_color(t.border))
+                  .child(
+                    h_flex()
+                      .w_full()
+                      .when(align === "right", (el) => el.justify_end())
+                      .when(align === "center", (el) => el.justify_center())
+                      .child(
+                        div()
+                          .min_w(0)
+                          .text_size(13)
+                          .line_height("20px")
+                          .text_color(t.foreground)
+                          .when(isHeader, (el) => el.font_weight(600))
+                          .child(
+                            content.trim()
+                              ? TextView.markdown(`${path}.r${rowIdx}.c${c}`, content)
+                                  .selectable(true)
+                                  .on_link_click((url, cx) => this.handleLinkClick(url, cx))
+                              : ""
+                          )
+                      )
+                  );
+              })
+            );
+        return div()
+          .w_full()
+          .overflow_x_scroll()
+          .child(
+            v_flex()
+              .min_w(320)
+              .border_1()
+              .border_color(t.border)
+              .rounded(6)
+              .overflow_hidden()
+              .child(renderTableRow(block.header || [], 0, true))
+              .children((block.rows || []).map((cells, r) => renderTableRow(cells, r + 1, false)))
+          );
+      }
+      default:
+        return div();
+    }
+  }
+
+  /**
+   * A Markdown image in a reply. The native Markdown view draws none, and the
+   * host only loads images from the app's own folder, so the reference shows
+   * as an attachment row: what it is, and where it lives.
+   * @param {{alt: string, src: string}} img
+   * @param {any} t theme
+   * @param {string} monoFont
+   */
+  renderImageRef(img, t, monoFont) {
+    const name = basename(img.src.split("?")[0]) || img.src;
+    return h_flex()
+      .w_full()
+      .pt(10)
+      .pb(6)
+      .child(
+        h_flex()
+          .max_w_full()
+          .items_center()
+          .gap(8)
+          .px(10)
+          .py(6)
+          .rounded(8)
+          .bg(t.raised)
+          .border_1()
+          .border_color(t.border)
+          .when(this.hasFileEditor, (el) =>
+            el
+              .cursor_pointer()
+              .hover((s) => s.bg(t.hover))
+              .on_click((_e, cx) => {
+                cx.stop_propagation();
+                this.handleLinkClick(img.src, cx);
+              })
+          )
+          .child(svg("mods/agent-chat/icons/paperclip.svg").size(13).flex_none().text_color(t.dim))
+          .child(
+            div()
+              .flex_none()
+              .text_size(12.5)
+              .text_color(t.foreground)
+              .child(img.alt || name)
+          )
+          .child(
+            div()
+              .min_w(0)
+              .truncate()
+              .text_size(11)
+              .font_family(monoFont)
+              .text_color(t.dim)
+              .child(img.src)
+          )
+      );
+  }
+
+  /** Debug/preview rows: top and bottom breathing room around the turns. */
+  feedRows() {
+    return [
+      { type: "spacer", key: "__top", ekey: "__top", size: 12 },
+      ...this.blocks,
+      { type: "spacer", key: "__bottom", ekey: "__bottom", size: 24 },
+    ];
+  }
+
+  /**
+   * One feed row plus its actions. In a plain flex column a row can own its
+   * handlers (the old virtual list had to route them through the list).
+   * @param {object} block
+   * @param {any} t theme
+   * @param {string} monoFont
+   */
+  feedRow(block, t, monoFont) {
+    if (block.type === "spacer") return this.renderRow(block, t, monoFont);
+    return div()
+      .id(`feed-row-${block.ekey}`)
+      .w_full()
+      .on_click((_e, cx) => this.onFeedItemClick(block.key, cx))
+      .on_mouse_down("right", (_e, cx) => this.onRowCopy(block.key, cx))
+      .child(this.renderRow(block, t, monoFont));
+  }
+
+  /** A pill that loads one page of older turns above the window or fetches from transcript/CLI. */
+  renderLoadEarlier(t, cx, mode = "memory") {
+    const label = this._cliFetching
+      ? "Loading earlier from terminal…"
+      : this._transcriptFetching
+      ? "Loading earlier messages…"
+      : mode === "cli"
+      ? "Load earlier from terminal"
+      : "Load earlier messages";
+    return h_flex()
+      .w_full()
+      .justify_center()
+      .py(10)
+      .child(
+        h_flex()
+          .id("chat-load-earlier")
+          .items_center()
+          .gap(6)
+          .px(12)
+          .py(5)
+          .rounded_full()
+          .bg(t.raised)
+          .border_1()
+          .border_color(t.border)
+          .cursor_pointer()
+          .hover((s) => s.bg(t.hover))
+          .on_click((_e, cx) => {
+            if (mode === "memory") this.loadEarlier(cx);
+            else if (mode === "transcript") this.fetchEarlierFromTranscript(cx);
+            else this.fetchEarlierFromCli(cx);
+          })
+          .child(svg("mods/agent-chat/icons/arrow-up.svg").size(12).text_color(t.dim))
+          .child(div().text_size(12).text_color(t.dim).child(label))
+      );
+  }
+
+  /** The floating "Scroll to end" / "New messages" pill over the feed. */
+  renderScrollPill(t, cx) {
+    return h_flex()
+      .absolute()
+      .bottom(8)
+      .left(0)
+      .right(0)
+      .justify_center()
+      .child(
+        h_flex()
+          .id("scroll-to-end-pill")
+          .items_center()
+          .gap(6)
+          .px(12)
+          .py(5)
+          .rounded_full()
+          .bg(t.raised)
+          .border_1()
+          .border_color(t.border)
+          .cursor_pointer()
+          .hover((s) => s.bg(t.hover))
+          .on_click((_e, cx) => this.returnToLive(cx))
+          .child(svg("mods/agent-chat/icons/arrow-down.svg").size(12).text_color(t.foreground))
+          .child(
+            div()
+              .text_size(12)
+              .font_medium()
+              .text_color(t.foreground)
+              .child(this.hasPending ? "New messages" : "Scroll to end")
+          )
+      );
+  }
+
+  /**
+   * The scrolling feed. Rows are laid out top-to-bottom in a deterministic
+   * viewport anchored by `scrollFromBottom` (`0` = pinned to live tail).
+   * Scrolling up freezes the window and lazy-loads older batches as needed.
+   */
+  renderFeed(t, monoFont, cx) {
+    if (this.blocks.length === 0) return this.renderEmptyFeed(t);
+    const { visible, start, maxScroll } = this.currentFeedLayout();
+    const scrollY = this.pinned ? maxScroll : Math.max(0, Math.min(maxScroll, this.scrollY || 0));
+    this.scrollY = scrollY;
+    this.scrollFromBottom = Math.max(0, maxScroll - scrollY);
+
+    const children = [];
+    const canFetchTranscript = Boolean(this.transcript?.hasEarlier) && !this.demo;
+    const canFetchCli = !this.transcript?.path && !this.transcript?.sessionId && !this._cliExhausted && !this.demo;
+    if (start > 0) children.push(this.renderLoadEarlier(t, cx, "memory"));
+    else if (canFetchTranscript) children.push(this.renderLoadEarlier(t, cx, "transcript"));
+    else if (canFetchCli) children.push(this.renderLoadEarlier(t, cx, "cli"));
+    children.push(div().w_full().h(12));
+    for (let i = 0; i < visible.length; i++) {
+      children.push(this.feedRow(visible[i], t, monoFont));
+    }
+    children.push(div().w_full().h(24));
+
+    return v_flex()
+      .id("chat-feed-container")
+      .flex_1()
+      .min_h(0)
+      .child(
+        div()
+          .id("chat-feed-viewport")
+          .flex_1()
+          .min_h(0)
+          .w_full()
+          .relative()
+          .overflow_hidden()
+          .on_size_change((size, cx) => this.onFeedResize(size, cx))
+          .on_scroll_wheel((e, cx) => this.onFeedWheel(e, cx))
+          .child(
+            v_flex()
+              .id("chat-feed-content")
+              .relative()
+              .top(-scrollY)
+              .w_full()
+              .on_size_change((size, cx) => this.onContentResize(size, cx))
+              .children(children)
+          )
+          .when(!this.pinned && this.scrollFromBottom > 12, (el) => el.child(this.renderScrollPill(t, cx)))
+      )
+      .when(this.status === "working", (el) => el.child(this.renderWorkingBar(t)));
+  }
+
+  /**
+   * The "Working · <what it is doing>" line under the feed, in the same column
+   * as the rows. Shown only while the agent works.
+   * @param {any} t theme
+   */
+  renderWorkingBar(t) {
+    const label = this.activeDetail ? `Working · ${this.activeDetail}` : "Working...";
+    return h_flex()
+      .w_full()
+      .justify_center()
+      .child(
+        v_flex()
+          .w_full()
+          .max_w(COLUMN)
+          .px(24)
+          .child(
+            div()
+              .id("working-timeline-row")
+              .w_full()
+              .py(8)
+              .border_b(1)
+              .border_color(withAlpha(t.border, "60"))
+              .child(
+                h_flex()
+                  .items_center()
+                  .gap(8)
+                  .child(
+                    svg("mods/agent-chat/icons/refresh.svg")
+                      .size(12)
+                      .text_color(t.working)
+                      .when(this._shown, (el) => el.spin(900))
+                  )
+                  .child(div().text_size(13).text_color(t.dim).child(label))
+              )
+          )
+      );
+  }
+
+  renderEmptyFeed(t) {
+    const agent = findAgent(this.terminal);
+    const agentName = agentDisplayName(agent, this.terminal);
+    const wsName = this.workspaceName();
+
+    return v_flex()
+      .id("chat-empty-feed")
+      .flex_1()
+      .min_h(0)
+      .items_center()
+      .justify_center()
+      .gap(12)
+      .child(iconFor(agent?.program, 32, t.dim))
+      .child(
+        div()
+          .text_size(20)
+          .font_semibold()
+          .text_color(t.foreground)
+          .child(`${agentName} · ${wsName}`)
+      )
+      .child(
+        div()
+          .text_size(13)
+          .text_color(t.dim)
+          .child(
+            this.terminal && this._readFor !== this.terminal
+              ? "Loading conversation…"
+              : "Send a message to start the conversation."
+          )
+      );
+  }
+
+  /** `{ model, effort }` display names; either may be null when it cannot be told. */
+  currentModelInfo() {
+    const agent = findAgent(this.terminal);
+    const app = agentApp(agent);
+    if (app === "codex") {
+      const state = this.currentCodexModelInfo();
+      const known = this.codexModels.find((m) => m.slug === state?.model);
+      return { model: known?.display_name || state?.model || null, effort: effortLabel(state?.effort) };
+    }
+    if (app === "claude-code") {
+      const seen = parseScreenModel(this.rawText, "claude-code");
+      const tr = this.transcript instanceof ClaudeTranscript && this.transcript.terminal === this.terminal
+        ? this.transcript
+        : null;
+      const pending = this.activeClaudePending();
+      const pendingModel = pending?.model
+        ? this.claudeModels.find((m) => m.id === pending.model)?.label || claudeModelLabel(pending.model, this.claudeModels)
+        : null;
+      return {
+        model: pendingModel || claudeModelLabel(tr?.model, this.claudeModels) || seen?.model || null,
+        effort: effortLabel(pending?.effort || tr?.effort || seen?.effort),
+      };
+    }
+    if (app === "antigravity" || app === "agy") {
+      const tr = this.transcript instanceof AntigravityTranscript && this.transcript.terminal === this.terminal
+        ? this.transcript
+        : null;
+      const agyScreen = parseScreenModel(this.rawText, "antigravity");
+      const families = groupAntigravityModels(this.agyModels);
+      if (this.agyPendingModel?.terminal === this.terminal) {
+        const pending = this.agyPendingModel;
+        const parsed = parseAntigravityModel(pending.id);
+        const fam = families.find((f) => f.id === parsed.familyId || f.id === pending.id);
+        const pendingLabel = fam?.label || prettyModel(parsed.familyId) || pending.id;
+        const screenMatches =
+          Boolean(agyScreen?.model) &&
+          agyScreen.model.toLowerCase() === pendingLabel.toLowerCase() &&
+          (!parsed.effort || (agyScreen.effort || "").toLowerCase() === parsed.effort.toLowerCase());
+        const expired = Date.now() - (pending.at || 0) > 10_000;
+        if ((tr && tr.model === pending.id) || screenMatches || expired) {
+          this.agyPendingModel = null;
+        } else {
+          return {
+            model: pendingLabel,
+            effort: effortLabel(parsed.effort || tr?.effort || null),
+          };
+        }
+      }
+      if (agyScreen?.model) {
+        return { model: agyScreen.model, effort: effortLabel(agyScreen.effort) };
+      }
+      if (tr?.model) {
+        const parsed = parseAntigravityModel(tr.model);
+        const fam = families.find(
+          (f) => f.id === parsed.familyId || f.id === tr.model || f.label.toLowerCase() === tr.model.toLowerCase()
+        );
+        return {
+          model: fam?.label || prettyModel(parsed.familyId) || tr.model,
+          effort: effortLabel(parsed.effort || tr.effort),
+        };
+      }
+      return { model: null, effort: null };
+    }
+    if (app === "opencode") {
+      const tr = this.transcript instanceof OpenCodeTranscript && this.transcript.terminal === this.terminal
+        ? this.transcript
+        : null;
+      const known = this.currentOpenCodeModel();
+      const seen = parseScreenModel(this.rawText, "opencode");
+      // Before the first session row exists the TUI footer is the only
+      // source; it names the model as "<name> <provider>", so resolve it
+      // against the catalogue instead of showing the raw label.
+      const model = known?.name || tr?.modelLabel || seen?.model || null;
+      if (!model) return { model: null, effort: null };
+      return { model, effort: effortLabel(tr?.effort || seen?.effort) };
+    }
+    const seen = parseScreenModel(this.rawText, app || "");
+    return { model: seen?.model || null, effort: effortLabel(seen?.effort) };
+  }
+
+  /** Returns the current Codex terminal snapshot without reading another terminal’s cache. */
+  currentCodexScreen() {
+    return this.codexModelScreen?.terminal === this.terminal ? this.codexModelScreen.text : this.rawText;
+  }
+
+  /** Uses the live Codex state because the transcript reflects the last turn. */
+  currentCodexModelInfo() {
+    const screen = this.currentCodexScreen();
+    const live = codexScreenModel(screen, this.codexModels);
+    if (live) return live;
+    const tr = this.transcript;
+    if (tr instanceof CodexTranscript && tr.terminal === this.terminal && tr.model) {
+      const known = this.codexModels.find((m) => m.slug === tr.model);
+      return { model: tr.model, effort: tr.effort || known?.default_reasoning_level || null };
+    }
+    return parseScreenModel(screen, "codex");
+  }
+
+  /** The model's display name, or null when it cannot be told. */
+  currentModel() {
+    return this.currentModelInfo().model;
+  }
+
+  /** Closes the model menu and clears any active search query. */
+  closeModelMenu() {
+    this.modelMenuOpen = false;
+    this.modelSearch?.set_value("");
+  }
+
+  /** Switches Antigravity's model optimistically and sends `/model <id>`. */
+  switchAntigravityModel(targetId, cx) {
+    if (this.terminal && targetId) {
+      this.agyPendingModel = { terminal: this.terminal, id: targetId, at: Date.now() };
+    }
+    this.chooseModel(`/model ${targetId}`, cx);
+  }
+
+  /** Closes the picker and prevents its terminal command from consuming an attached image. */
+  beginModelSelection(cx) {
+    this.closeModelMenu();
+    cx.notify();
+    if (!this.terminal || this.codexSwitching) return false;
+    if (this.attached > 0) {
+      this.notice = "Send or clear the attached image before switching models.";
+      cx.notify();
+      cx.timer.after(4000, (cx) => {
+        this.notice = null;
+        cx.notify();
+      });
+      return false;
+    }
+    return true;
+  }
+
+  /** Remembers a Claude `/model` or `/effort` choice so the UI shows it before the transcript confirms. */
+  setClaudePending(command) {
+    const m = /^\/(model|effort)\s+(\S+)$/.exec(command);
+    const tr = this.transcript;
+    if (!m || !this.terminal || !(tr instanceof ClaudeTranscript)) return;
+    const prev = this.claudePending?.terminal === this.terminal ? this.claudePending : {};
+    this.claudePending = {
+      terminal: this.terminal,
+      model: prev.model,
+      effort: prev.effort,
+      [m[1]]: m[2],
+      base: { model: tr.model, effort: tr.effort },
+      at: Date.now(),
+    };
+  }
+
+  /** The pending Claude choice, or null once confirmed by the transcript or after 10 s. */
+  activeClaudePending() {
+    const p = this.claudePending;
+    if (!p) return null;
+    const tr = this.transcript instanceof ClaudeTranscript && this.transcript.terminal === p.terminal ? this.transcript : null;
+    const confirmed = tr && ((p.model && tr.model !== p.base.model) || (p.effort && tr.effort !== p.base.effort));
+    if (p.terminal !== this.terminal || confirmed || Date.now() - p.at > 10_000) {
+      this.claudePending = null;
+      return null;
+    }
+    return p;
+  }
+
+  /** Switches models the way the agent itself does: a slash command typed into it. */
+  chooseModel(command, cx) {
+    if (!this.beginModelSelection(cx)) return;
+    this.setClaudePending(command);
+    cx.spawn(async (cx) => {
+      try {
+        await this.sendTextToTerminal(command);
+        await this.update(cx);
+        // Claude confirms in its transcript a moment later: re-read quickly instead of waiting for the 1 s poll.
+        for (let i = 0; i < 6 && this.claudePending; i++) {
+          await new Promise((resolve) => cx.timer.after(300, resolve));
+          await this.update(cx);
+        }
+      } catch (err) {
+        this.flashNotice(err, cx);
+      }
+      cx.notify();
+    });
+  }
+
+  /**
+   * Applies a session-only Codex choice using the inline `/model` command.
+   * @param {object} model Codex app-server catalogue entry
+   * @param {string|null} effort
+   * @param {any} cx
+   * @param {boolean} [effortOnly=false] Keep the model already selected in Codex.
+   */
+  switchCodexModel(model, effort, cx, effortOnly = false) {
+    if (!this.beginModelSelection(cx)) return;
+    const terminal = this.terminal;
+    const models = this.codexModels;
+    this.codexSwitching = true;
+    cx.spawn(async (cx) => {
+      try {
+        const text = await applyCodexModel({
+          model,
+          models,
+          effort,
+          effortOnly,
+          wait: (ms) => new Promise((resolve) => cx.timer.after(ms, resolve)),
+          send: (command) => this.sendTextToTerminal(command, { terminal }),
+          read: async () => {
+            const res = await hcOrThrow(["read", terminal, "--lines", "0", "--json"]);
+            return JSON.parse(res.stdout)?.text || "";
+          },
+        });
+        if (this.terminal === terminal) {
+          this.codexModelScreen = { terminal, text };
+          await this.update(cx);
+        }
+      } catch (err) {
+        if (this.terminal === terminal) this.flashNotice(err, cx);
+      } finally {
+        this.codexSwitching = false;
+        cx.notify();
+      }
+    });
+  }
+
+  /** Discovers models and capabilities by running the active harness's own command. */
+  refreshModels(cx, force = false) {
+    const terminal = this.terminal;
+    if (this.modelsTerminal !== this.terminal) {
+      this.modelsTerminal = this.terminal;
+      this.modelsAt = 0;
+    }
+    if (this.modelsLoading) return;
+    if (!force && this.modelsAt && Date.now() - this.modelsAt < 60_000) return;
+    const app = agentApp(findAgent(this.terminal));
+    if (!app) return;
+    this.modelsLoading = true;
+    cx.notify();
+    const on = terminalMachine(this.terminal) ?? spaces().find((s) => s.active)?.machine ?? null;
+    cx.spawn(async (cx) => {
+      try {
+        if (app === "claude-code") {
+          const cmd =
+            'printf \'{"type":"control_request","request_id":"1","request":{"subtype":"initialize"}}\\n\' | claude -p --input-format stream-json --output-format stream-json --verbose --no-session-persistence --bare 2>/dev/null';
+          const res = await exec("sh", ["-lc", cmd], { on });
+          if (res.code === 0 && res.stdout) {
+            const parsed = parseClaudeModelsResponse(res.stdout);
+            if (parsed.length > 0) this.claudeModels = parsed;
+          }
+        } else if (app === "opencode") {
+          const [catalogue, providerList] = await Promise.all([
+            exec("opencode", ["api", "GET", "/api/model"], { on }),
+            exec("opencode", ["api", "GET", "/api/provider"], { on }),
+          ]);
+          if (catalogue.code === 0) {
+            const data = JSON.parse(catalogue.stdout)?.data ?? [];
+            this.models = data.filter((m) => !m.type || m.type === "chat");
+          }
+          if (providerList.code === 0) {
+            const data = JSON.parse(providerList.stdout)?.data ?? [];
+            this.providers = Object.fromEntries(data.map((p) => [p.id, p.name || p.id]));
+          }
+        } else if (app === "codex") {
+          const cmd =
+            '(printf \'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"herdr","version":"1.0"}}}\\n{"jsonrpc":"2.0","method":"initialized"}\\n{"jsonrpc":"2.0","id":2,"method":"model/list","params":{}}\\n\'; sleep 0.5) | codex app-server 2>/dev/null';
+          const res = await exec("sh", ["-lc", cmd], { on });
+          if (res.code === 0 && res.stdout && terminal === this.terminal) {
+            const parsed = parseCodexModelsResponse(res.stdout);
+            if (parsed.length > 0) this.codexModels = parsed;
+            this.codexCatalogueVersion = { terminal, value: codexAppServerVersion(res.stdout) };
+          }
+        } else if (app === "antigravity" || app === "agy") {
+          const res = await exec("sh", ["-lc", "agy models 2>/dev/null"], { on });
+          if (res.code === 0 && res.stdout.trim()) {
+            const parsed = parseAntigravityModelsOutput(res.stdout);
+            if (parsed.length > 0) this.agyModels = parsed;
+          }
+        }
+      } catch (_err) {
+        // Keep the last good catalogue
+      } finally {
+        this.modelsLoading = false;
+        this.modelsAt = Date.now();
+        cx.notify();
+      }
+    });
+  }
+
+  /** The catalogue entry of the OpenCode session's current model, or null. */
+  currentOpenCodeModel() {
+    const tr = this.transcript instanceof OpenCodeTranscript && this.transcript.terminal === this.terminal
+      ? this.transcript
+      : null;
+    if (!tr && agentApp(findAgent(this.terminal)) !== "opencode") return null;
+    if (tr?.model) {
+      const exact =
+        this.models.find((m) => m.modelID === tr.model && (!tr.provider || m.providerID === tr.provider)) ||
+        this.models.find((m) => m.modelID === tr.model);
+      if (exact) return exact;
+    }
+    // No session row yet (a fresh TUI): the footer still names the model and
+    // the catalogue knows its variants, so effort stays selectable.
+    const seen = parseScreenModel(this.rawText, "opencode");
+    return resolveOpenCodeModel(this.models, this.providers, tr?.model || seen?.model, tr?.provider || null);
+  }
+
+  /**
+   * Switches an OpenCode session to a catalogue model through its server API.
+   * Effort is the model's `variant`: pass one to change it, or leave it out to
+   * keep the current effort when the new model offers it.
+   * @param {any} model catalogue entry
+   * @param {any} cx
+   * @param {string|null} [variant]
+   */
+  switchOpenCodeModel(model, cx, variant) {
+    if (variant === undefined) {
+      const current = this.transcript instanceof OpenCodeTranscript ? this.transcript.effort : null;
+      variant = current && (model.variants || []).some((v) => v.id === current) ? current : null;
+    }
+    this.closeModelMenu();
+    cx.notify();
+    const session =
+      this.transcript instanceof OpenCodeTranscript && this.transcript.terminal === this.terminal
+        ? this.transcript.sessionId
+        : null;
+    if (!session) {
+      this.chooseModel("/models", cx);
+      return;
+    }
+    const on = spaces().find((s) => s.active)?.machine ?? null;
+    cx.spawn(async (cx) => {
+      try {
+        const ref = { id: model.modelID, providerID: model.providerID };
+        if (variant) ref.variant = variant;
+        const body = JSON.stringify({ model: ref });
+        const r = await exec("opencode", ["api", "--data", body, "POST", `/api/session/${session}/model`], { on });
+        if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `exit ${r.code}`);
+        const name = model.name || model.modelID;
+        this.notice = variant ? `${name} · ${effortLabel(variant)} selected` : `${name} selected`;
+        cx.timer.after(2500, (cx) => {
+          this.notice = null;
+          cx.notify();
+        });
+        await this.update(cx);
+      } catch (err) {
+        this.notice = `Could not switch model: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      cx.notify();
+    });
+  }
+
+  /**
+   * Two-column Model & Reasoning Effort Popover. `maxH` keeps the floating
+   * menu inside the room left above the composer.
+   */
+  renderModelMenu(t, cx, maxH = 420) {
+    const agent = findAgent(this.terminal);
+    const term = terminals().find((x) => x.address === this.terminal);
+    const agentName = agent?.title || agent?.program?.name || term?.name || this.terminal || "No agent";
+    const app = agentApp(agent);
+    const isClaude = app === "claude-code";
+    const isOpenCode = app === "opencode";
+    const isCodex = app === "codex";
+    const isAntigravity = app === "antigravity" || app === "agy";
+
+    const currentModelInfo = this.currentModelInfo();
+    const currentModelName = currentModelInfo.model;
+    const currentEffort = currentModelInfo.effort;
+
+    const row = (id, title, note, selected, onClick) =>
+      h_flex()
+        .id(id)
+        .items_center()
+        .gap(10)
+        .px(10)
+        .py(6)
+        .rounded(8)
+        .cursor_pointer()
+        .hover((s) => s.bg(t.hover))
+        .on_click(onClick)
+        .child(
+          v_flex()
+            .flex_1()
+            .min_w(0)
+            .child(
+              div()
+                .text_size(12.5)
+                .font_medium()
+                .text_color(selected ? t.accent : t.foreground)
+                .child(title)
+            )
+            .when(Boolean(note), (el) => el.child(div().text_size(11).text_color(t.dim).child(note)))
+        )
+        .when(selected, (el) => el.child(svg("mods/agent-chat/icons/check.svg").size(13).text_color(t.accent)));
+
+    const agyFamilies = isAntigravity
+      ? groupAntigravityModels(this.agyModels)
+      : [];
+    const currentAgyId =
+      this.agyPendingModel?.terminal === this.terminal
+        ? this.agyPendingModel.id
+        : this.transcript instanceof AntigravityTranscript && this.transcript.terminal === this.terminal
+        ? this.transcript.model
+        : null;
+    const currentAgyParsed = currentAgyId ? parseAntigravityModel(currentAgyId) : null;
+    const currentAgyFamily = isAntigravity
+      ? agyFamilies.find(
+          (f) =>
+            (currentAgyParsed && f.id === currentAgyParsed.familyId) ||
+            f.id === currentAgyId ||
+            (currentModelName && f.label === currentModelName)
+        ) || agyFamilies[0] || null
+      : null;
+
+    const currentClaudeRawId =
+      (isClaude && this.activeClaudePending()?.model) ||
+      (this.transcript instanceof ClaudeTranscript && this.transcript.terminal === this.terminal
+        ? this.transcript.model
+        : null);
+    const currentClaudeModel = isClaude
+      ? this.claudeModels.find(
+          (m) =>
+            (currentClaudeRawId && (m.id === currentClaudeRawId || m.resolvedModel === currentClaudeRawId || currentClaudeRawId.startsWith(m.resolvedModel || m.id))) ||
+            (currentModelName && (m.label === currentModelName || currentModelName.includes(m.label)))
+        ) || this.claudeModels[0] || null
+      : null;
+
+    const codexState = isCodex ? this.currentCodexModelInfo() : null;
+    const currentCodexModel = this.codexModels.find((m) => m.slug === codexState?.model);
+    const codexVersion = this.codexCatalogueVersion?.terminal === this.terminal ? this.codexCatalogueVersion.value : null;
+    const codexInline = isCodex && codexSupportsInlineModel(this.currentCodexScreen(), codexVersion);
+
+    const totalModelCount = isClaude
+      ? this.claudeModels.length
+      : isOpenCode
+      ? this.models.length
+      : codexInline
+      ? this.codexModels.length
+      : isAntigravity
+      ? agyFamilies.length
+      : 0;
+    const showSearch = totalModelCount > MODEL_SEARCH_THRESHOLD;
+    const searchQuery = showSearch ? (this.modelSearch?.value() || "").trim() : "";
+
+    /** @type {any[]} */
+    let modelRows = [];
+    if (isClaude && this.claudeModels.length > 0) {
+      const filtered = this.claudeModels.filter((m) =>
+        matchesModelQuery(searchQuery, [m.label, m.id, m.note])
+      );
+      modelRows = filtered.map((m) =>
+        row(
+          `model-${m.id}`,
+          m.label,
+          m.note,
+          m.id !== "default" && Boolean(currentClaudeModel && currentClaudeModel.id === m.id),
+          (_e, cx) => this.chooseModel(`/model ${m.id}`, cx)
+        )
+      );
+      if (!searchQuery) {
+        modelRows.push(
+          row("model-open-native", "More models…", "Open Claude Code's /model picker", false, (_e, cx) =>
+            this.chooseModel("/model", cx)
+          )
+        );
+      }
+    } else if (isClaude) {
+      modelRows = [
+        row(
+          "model-open-native",
+          "Open Claude /model selector",
+          this.modelsLoading ? "Discovering models from Claude CLI…" : "Run /model in terminal",
+          false,
+          (_e, cx) => this.chooseModel("/model", cx)
+        ),
+      ];
+    } else if (isOpenCode && this.models.length > 0) {
+      const groups = new Map();
+      for (const m of this.models) {
+        if (!groups.has(m.providerID)) groups.set(m.providerID, []);
+        groups.get(m.providerID).push(m);
+      }
+      const providerName = (id) => this.providers[id] || id;
+      const currentProvider = this.currentOpenCodeModel()?.providerID;
+      const order = [...groups.keys()].sort((a, b) => {
+        if (a === currentProvider) return -1;
+        if (b === currentProvider) return 1;
+        return providerName(a).localeCompare(providerName(b));
+      });
+      const ocCurrent = this.currentOpenCodeModel();
+      for (const provider of order) {
+        const pName = providerName(provider);
+        const entries = groups
+          .get(provider)
+          .filter((m) => matchesModelQuery(searchQuery, [m.name, m.modelID, pName, provider]))
+          .slice()
+          .sort((a, b) => (a.name || a.modelID).localeCompare(b.name || b.modelID));
+        if (entries.length === 0) continue;
+        modelRows.push(
+          div().px(10).pt(6).pb(2).text_size(10.5).font_semibold().text_color(t.dim).child(pName)
+        );
+        for (const m of entries) {
+          const isCurrent = ocCurrent
+            ? ocCurrent.providerID === m.providerID && ocCurrent.modelID === m.modelID
+            : Boolean(currentModelName && (currentModelName === m.name || currentModelName === m.modelID));
+          modelRows.push(
+            row(
+              `model-${provider}-${m.modelID}`,
+              m.name || prettyModel(m.modelID) || m.modelID,
+              "",
+              isCurrent,
+              (_e, cx) => this.switchOpenCodeModel(m, cx)
+            )
+          );
+        }
+      }
+    } else if (codexInline && this.codexModels.length > 0) {
+      modelRows = this.codexModels
+        .filter((m) => matchesModelQuery(searchQuery, [m.display_name, m.slug, m.description]))
+        .map((m) =>
+          row(
+            `model-${m.slug}`,
+            m.display_name || m.slug,
+            m.description || "",
+            m.slug === currentCodexModel?.slug,
+            (_e, cx) => this.switchCodexModel(m, codexModelEffort(m, codexState?.effort), cx)
+          )
+        );
+    } else if (isCodex) {
+      modelRows = [
+        row(
+          "model-open-native",
+          "Open Codex /model selector",
+          this.modelsLoading ? "Discovering models from Codex…" : "Run /model in terminal",
+          false,
+          (_e, cx) => this.chooseModel("/model", cx)
+        ),
+      ];
+    } else if (isAntigravity && agyFamilies.length > 0) {
+      modelRows = agyFamilies
+        .filter((fam) => matchesModelQuery(searchQuery, [fam.label, fam.id, ...Object.values(fam.variants)]))
+        .map((fam) => {
+          const curEff = (currentEffort || currentAgyParsed?.effort || "medium").toLowerCase();
+          const targetId = fam.variants[curEff] || fam.variants.medium || fam.variants.default || Object.values(fam.variants)[0] || fam.id;
+          return row(
+            `model-${fam.id}`,
+            fam.label,
+            "",
+            Boolean(currentAgyFamily && currentAgyFamily.id === fam.id),
+            (_e, cx) => this.switchAntigravityModel(targetId, cx)
+          );
+        });
+    } else if (isAntigravity) {
+      modelRows = [
+        row(
+          "model-open-native",
+          "Open Antigravity /model selector",
+          this.modelsLoading ? "Discovering models from agy…" : "Run /model in terminal",
+          false,
+          (_e, cx) => this.chooseModel("/model", cx)
+        ),
+      ];
+    } else {
+      modelRows = [
+        row("model-open-native", "Open native model selector", `Run /models in ${agentName}`, false, (_e, cx) =>
+          this.chooseModel("/models", cx)
+        ),
+      ];
+    }
+
+    if (searchQuery && modelRows.length === 0) {
+      modelRows = [
+        div()
+          .px(10)
+          .py(12)
+          .text_size(12)
+          .text_color(t.dim)
+          .child(`No models match "${searchQuery}".`),
+      ];
+    }
+
+    const ocModel = isOpenCode ? this.currentOpenCodeModel() : null;
+    const claudeEfforts = isClaude && currentClaudeModel?.efforts?.length
+      ? currentClaudeModel.efforts.map((id) => ({ id, label: effortLabel(id), note: null }))
+      : [];
+    const codexEfforts = codexInline
+      ? (currentCodexModel?.supported_reasoning_levels || [])
+          .map((l) => l?.effort)
+          .filter(Boolean)
+          .map((id) => ({ id, label: effortLabel(id), note: null }))
+      : [];
+    const agyEfforts = isAntigravity && currentAgyFamily?.efforts?.length
+      ? currentAgyFamily.efforts.map((id) => ({ id, label: effortLabel(id), note: null }))
+      : [];
+
+    const effortOptions = isOpenCode
+      ? ocModel?.variants?.length
+        ? [
+            { id: "default", label: "Default", note: "Model default" },
+            ...ocModel.variants.map((v) => ({ id: v.id, label: effortLabel(v.id), note: null })),
+          ]
+        : []
+      : isClaude
+      ? claudeEfforts
+      : isCodex
+      ? codexEfforts
+      : isAntigravity
+      ? agyEfforts
+      : [];
+    const pickEffort = (id, cx) => {
+      if (isOpenCode) {
+        if (ocModel) this.switchOpenCodeModel(ocModel, cx, id === "default" ? null : id);
+      } else if (isCodex) {
+        if (currentCodexModel) this.switchCodexModel(currentCodexModel, id, cx, true);
+      } else if (isAntigravity && currentAgyFamily?.variants?.[id]) {
+        this.switchAntigravityModel(currentAgyFamily.variants[id], cx);
+      } else {
+        this.chooseModel(`/effort ${id}`, cx);
+      }
+    };
+    const effortRows = effortOptions.map((e) => {
+      const isSelected = currentEffort
+        ? currentEffort.toLowerCase() === e.id
+        : isOpenCode && e.id === "default";
+      return h_flex()
+        .id(`effort-${e.id}`)
+        .items_center()
+        .justify_between()
+        .px(8)
+        .py(6)
+        .rounded(8)
+        .cursor_pointer()
+        .hover((s) => s.bg(t.hover))
+        .on_click((_e, cx) => pickEffort(e.id, cx))
+        .child(
+          h_flex()
+            .items_center()
+            .gap(8)
+            .child(renderEffortGlyph(e.id, t, true))
+            .child(
+              v_flex()
+                .child(
+                  div()
+                    .text_size(12.5)
+                    .font_medium()
+                    .text_color(isSelected ? t.accent : t.foreground)
+                    .child(e.label)
+                )
+                .when(Boolean(e.note), (el) =>
+                  el.child(div().text_size(10.5).text_color(t.dim).child(e.note))
+                )
+            )
+        )
+        .when(isSelected, (el) =>
+          el.child(svg("mods/agent-chat/icons/check.svg").size(13).text_color(t.accent))
+        );
+    });
+
+    return v_flex()
+      .id("model-menu")
+      .w_full()
+      .max_h(maxH)
+      .rounded(16)
+      .bg(t.raised)
+      .border_1()
+      .border_color(t.border)
+      .overflow_hidden()
+      .child(
+        h_flex()
+          .w_full()
+          .h(Math.min(340, Math.max(160, maxH - 2)))
+          // Left Column: Models
+          .child(
+            v_flex()
+              .id("model-menu-models")
+              .flex_1()
+              .min_w(0)
+              .h_full()
+              .p(8)
+              .border_r(1)
+              .border_color(t.border)
+              .child(
+                div()
+                  .flex_none()
                   .px(8)
                   .pt(4)
                   .pb(6)
@@ -3787,7 +5423,53 @@ export default class AgentChat extends View {
                   .text_color(t.dim)
                   .child("MODELS")
               )
-              .children(modelRows)
+              .when(showSearch, (el) =>
+                el.child(
+                  h_flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(6)
+                    .mx(4)
+                    .mb(6)
+                    .px(8)
+                    .h(28)
+                    .rounded(8)
+                    .bg(t.background)
+                    .border_1()
+                    .border_color(t.border)
+                    .child(svg("mods/agent-chat/icons/search.svg").size(12).flex_none().text_color(t.dim))
+                    .child(
+                      div()
+                        .flex_1()
+                        .min_w(0)
+                        .child(Input.new(this.modelSearch).w_full().text_size(12).text_color(t.foreground))
+                    )
+                    .when(Boolean(searchQuery), (bar) =>
+                      bar.child(
+                        div()
+                          .id("model-search-clear")
+                          .cursor_pointer()
+                          .px(4)
+                          .text_size(13)
+                          .text_color(t.dim)
+                          .hover((s) => s.text_color(t.foreground))
+                          .on_click((_e, cx) => {
+                            this.modelSearch.set_value("");
+                            cx.notify();
+                          })
+                          .child("×")
+                      )
+                    )
+                )
+              )
+              .child(
+                v_flex()
+                  .id("model-menu-models-list")
+                  .flex_1()
+                  .min_h(0)
+                  .overflow_y_scrollbar()
+                  .children(modelRows)
+              )
           )
           // Right Column: Reasoning Effort
           .child(
@@ -3814,7 +5496,7 @@ export default class AgentChat extends View {
                     .px(8)
                     .text_size(11)
                     .text_color(t.dim)
-                    .child(ocModel ? "This model has no effort levels." : "Loading model details…")
+                    .child(this.modelsLoading ? "Loading model details…" : "This model has no effort levels.")
                 )
               )
           )
