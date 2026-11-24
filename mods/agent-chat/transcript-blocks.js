@@ -1065,8 +1065,6 @@ export function parseScreenModel(text, app = "") {
   return !normalizedApp ? parseClaude() : null;
 }
 
-const EFFORT_ORDER = ["low", "medium", "high", "xhigh", "max"];
-
 const AGY_EFFORT_SUFFIX_RE = /-(low|medium|high|xhigh)$/i;
 
 /**
@@ -1080,6 +1078,8 @@ export function parseAntigravityModel(id) {
   if (!m) return { familyId: raw, effort: "" };
   return { familyId: raw.slice(0, -m[0].length), effort: m[1].toLowerCase() };
 }
+
+const EFFORT_ORDER = ["low", "medium", "high", "xhigh", "max"];
 
 /**
  * Groups flat Antigravity model entries (e.g. `gemini-4-neon-low`, `gemini-4-neon-high`)

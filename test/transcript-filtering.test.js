@@ -16,8 +16,6 @@ const {
   settingChange,
   stripHarnessXml,
   screenModel,
-  matchesModelQuery,
-  parseScreenModel,
   groupAntigravityModels,
   terminalMachine,
   terminalLocalAddress,
@@ -32,6 +30,8 @@ const {
   prependEarlierBlocks,
   preserveScrollOnResize,
   applyPrependAnchor,
+  matchesModelQuery,
+  parseScreenModel,
 } = await import("../mods/agent-chat/transcript-blocks.js");
 const { buildOpenCodePollQuery, buildOpenCodeEarlierQuery, messageItems } = await import("../mods/agent-chat/opencode-data.js");
 const { parseConversation } = await import("../mods/agent-chat/parser.js");
