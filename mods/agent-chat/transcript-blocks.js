@@ -1065,6 +1065,8 @@ export function parseScreenModel(text, app = "") {
   return !normalizedApp ? parseClaude() : null;
 }
 
+const EFFORT_ORDER = ["low", "medium", "high", "xhigh", "max"];
+
 const AGY_EFFORT_SUFFIX_RE = /-(low|medium|high|xhigh)$/i;
 
 /**
@@ -1107,7 +1109,18 @@ export function groupAntigravityModels(models) {
       entry.variants.default = id;
     }
   }
-  return [...byFamily.values()];
+  const families = [...byFamily.values()];
+  for (const fam of families) {
+    fam.efforts.sort((a, b) => {
+      const ia = EFFORT_ORDER.indexOf(a);
+      const ib = EFFORT_ORDER.indexOf(b);
+      if (ia !== -1 && ib !== -1) return ia - ib;
+      if (ia !== -1) return -1;
+      if (ib !== -1) return 1;
+      return 0;
+    });
+  }
+  return families;
 }
 
 /**
@@ -1299,7 +1312,7 @@ export function parseAntigravityModelsOutput(stdout) {
   const clean = String(stdout || "").replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "");
   const parsed = [];
   for (const raw of clean.split(/[\r\n]+/)) {
-    const m = raw.match(/^\s*([a-z0-9][a-z0-9._-]+)\s{2,}(.+?)\s*$/i);
+    const m = raw.match(/^\s*([a-z0-9][a-z0-9._-]+)(?:\t+|\s{2,})(.+?)\s*$/i);
     if (m && m[1].toLowerCase() !== "id") {
       parsed.push({ id: m[1].trim(), label: m[2].trim() });
     }

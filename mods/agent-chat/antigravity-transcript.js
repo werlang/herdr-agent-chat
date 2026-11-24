@@ -59,7 +59,21 @@ export function ingestAntigravityEntry(state, entry) {
     const settingsChange = raw.match(/<USER_SETTINGS_CHANGE>([\s\S]*?)<\/USER_SETTINGS_CHANGE>/i)?.[1];
     if (settingsChange) {
       const m = settingsChange.match(/model\s*[:=]\s*([^\s,<]+)/i);
-      if (m) state.model = m[1].trim();
+      if (m) {
+        state.model = m[1].trim();
+      } else {
+        const sel = settingsChange.match(/setting\s+`Model Selection`\s+from\s+.+?\s+to\s+([^.\n<]+)/i);
+        if (sel) {
+          const val = sel[1].trim();
+          const eff = val.match(/\s*\((minimal|low|medium|high|xhigh|max|ultra)\)\s*$/i);
+          if (eff) {
+            state.model = val.slice(0, -eff[0].length).trim();
+            state.effort = eff[1].toLowerCase();
+          } else {
+            state.model = val;
+          }
+        }
+      }
     }
     const text = stripHarnessXml(raw);
     if (!text || /^\/(?:model|effort)\b/i.test(text)) return;

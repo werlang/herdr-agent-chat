@@ -446,6 +446,7 @@ export default class AgentChat extends View {
     this.providers = {}; // providerID → display name
     this.codexModels = [];
     this.agyModels = [];
+    this.agyPendingModel = null;
     this.modelsTerminal = null;
     this.modelsAt = 0;
     this.modelsLoading = false;
@@ -3223,15 +3224,41 @@ export default class AgentChat extends View {
       const tr = this.transcript instanceof AntigravityTranscript && this.transcript.terminal === this.terminal
         ? this.transcript
         : null;
+      const agyScreen = parseScreenModel(this.rawText, "antigravity");
+      const families = groupAntigravityModels(this.agyModels);
+      if (this.agyPendingModel?.terminal === this.terminal) {
+        const pending = this.agyPendingModel;
+        const parsed = parseAntigravityModel(pending.id);
+        const fam = families.find((f) => f.id === parsed.familyId || f.id === pending.id);
+        const pendingLabel = fam?.label || prettyModel(parsed.familyId) || pending.id;
+        const screenMatches =
+          Boolean(agyScreen?.model) &&
+          agyScreen.model.toLowerCase() === pendingLabel.toLowerCase() &&
+          (!parsed.effort || (agyScreen.effort || "").toLowerCase() === parsed.effort.toLowerCase());
+        const expired = Date.now() - (pending.at || 0) > 10_000;
+        if ((tr && tr.model === pending.id) || screenMatches || expired) {
+          this.agyPendingModel = null;
+        } else {
+          return {
+            model: pendingLabel,
+            effort: effortLabel(parsed.effort || tr?.effort || null),
+          };
+        }
+      }
+      if (agyScreen?.model) {
+        return { model: agyScreen.model, effort: effortLabel(agyScreen.effort) };
+      }
       if (tr?.model) {
         const parsed = parseAntigravityModel(tr.model);
-        const families = groupAntigravityModels(this.agyModels);
-        const fam = families.find((f) => f.id === parsed.familyId || f.id === tr.model);
+        const fam = families.find(
+          (f) => f.id === parsed.familyId || f.id === tr.model || f.label.toLowerCase() === tr.model.toLowerCase()
+        );
         return {
           model: fam?.label || prettyModel(parsed.familyId) || tr.model,
-          effort: effortLabel(tr.effort || parsed.effort),
+          effort: effortLabel(parsed.effort || tr.effort),
         };
       }
+      return { model: null, effort: null };
     }
     const seen = parseScreenModel(this.rawText, app || "");
     return { model: seen?.model || null, effort: effortLabel(seen?.effort) };
@@ -3240,6 +3267,14 @@ export default class AgentChat extends View {
   /** The model's display name, or null when it cannot be told. */
   currentModel() {
     return this.currentModelInfo().model;
+  }
+
+  /** Switches Antigravity's model optimistically and sends `/model <id>`. */
+  switchAntigravityModel(targetId, cx) {
+    if (this.terminal && targetId) {
+      this.agyPendingModel = { terminal: this.terminal, id: targetId, at: Date.now() };
+    }
+    this.chooseModel(`/model ${targetId}`, cx);
   }
 
   /** Switches models the way the agent itself does: a slash command typed into it. */
@@ -3364,7 +3399,7 @@ export default class AgentChat extends View {
             if (parsed.length > 0) this.codexModels = parsed;
           }
         } else if (app === "antigravity" || app === "agy") {
-          const res = await exec("agy", ["models"], { on });
+          const res = await exec("sh", ["-lc", "agy models 2>/dev/null"], { on });
           if (res.code === 0 && res.stdout.trim()) {
             const parsed = parseAntigravityModelsOutput(res.stdout);
             if (parsed.length > 0) this.agyModels = parsed;
@@ -3490,7 +3525,9 @@ export default class AgentChat extends View {
       ? groupAntigravityModels(this.agyModels)
       : [];
     const currentAgyId =
-      this.transcript instanceof AntigravityTranscript && this.transcript.terminal === this.terminal
+      this.agyPendingModel?.terminal === this.terminal
+        ? this.agyPendingModel.id
+        : this.transcript instanceof AntigravityTranscript && this.transcript.terminal === this.terminal
         ? this.transcript.model
         : null;
     const currentAgyParsed = currentAgyId ? parseAntigravityModel(currentAgyId) : null;
@@ -3618,7 +3655,7 @@ export default class AgentChat extends View {
           fam.label,
           "",
           Boolean(currentAgyFamily && currentAgyFamily.id === fam.id),
-          (_e, cx) => this.chooseModel(`/model ${targetId}`, cx)
+          (_e, cx) => this.switchAntigravityModel(targetId, cx)
         );
       });
     } else if (isAntigravity) {
@@ -3673,7 +3710,7 @@ export default class AgentChat extends View {
       } else if (isCodex) {
         if (currentCodexSlug) this.switchCodexModel(currentCodexSlug, id, cx);
       } else if (isAntigravity && currentAgyFamily?.variants?.[id]) {
-        this.chooseModel(`/model ${currentAgyFamily.variants[id]}`, cx);
+        this.switchAntigravityModel(currentAgyFamily.variants[id], cx);
       } else {
         this.chooseModel(`/effort ${id}`, cx);
       }

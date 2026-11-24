@@ -446,6 +446,36 @@ test("applyPrependAnchor shifts scrollY by exact real height delta so visible ro
   assert.equal(440 + (newHeight - prevHeight) - nextScrollY, 400);
 });
 
+test("parseAntigravityModelsOutput parses TSV and padded agy models output", () => {
+  const sample = [
+    "\x1b[?25l⠋ Fetching available models...\r",
+    "ID\tLABEL",
+    "gemini-4-neon-high\tGemini 4 Neon (High)",
+    "gemini-4-neon-low\tGemini 4 Neon (Low)",
+    "gemini-pro-orchestrator-neon   Orchestrator (Neon)",
+  ].join("\n");
+  assert.deepEqual(parseAntigravityModelsOutput(sample), [
+    { id: "gemini-4-neon-high", label: "Gemini 4 Neon (High)" },
+    { id: "gemini-4-neon-low", label: "Gemini 4 Neon (Low)" },
+    { id: "gemini-pro-orchestrator-neon", label: "Orchestrator (Neon)" },
+  ]);
+});
+
+test("groupAntigravityModels sorts efforts canonically and handles effort-less models", () => {
+  const grouped = groupAntigravityModels([
+    { id: "gemini-4-neon-high", label: "Gemini 4 Neon (High)" },
+    { id: "gemini-4-neon-xhigh", label: "Gemini 4 Neon (XHigh)" },
+    { id: "gemini-4-neon-medium", label: "Gemini 4 Neon (Medium)" },
+    { id: "gemini-4-neon-low", label: "Gemini 4 Neon (Low)" },
+    { id: "gemini-pro-orchestrator-neon", label: "Orchestrator (Neon)" },
+  ]);
+  assert.equal(grouped.length, 2);
+  assert.deepEqual(grouped[0].efforts, ["low", "medium", "high", "xhigh"]);
+  assert.equal(grouped[0].label, "Gemini 4 Neon");
+  assert.deepEqual(grouped[1].efforts, []);
+  assert.equal(grouped[1].variants.default, "gemini-pro-orchestrator-neon");
+});
+
 test("parseScreenModel reads real Antigravity, Codex, Claude, and OpenCode footers", () => {
   assert.deepEqual(
     parseScreenModel("esc to cancel                                              auto · Gemini 4 Neon · low", "antigravity"),
@@ -516,4 +546,16 @@ test("parseScreenModel reads real Antigravity, Codex, Claude, and OpenCode foote
     model: "DeepSeek V4.1 Flash 1017 OpenCode Go",
     effort: "max",
   });
+});
+
+test("ingestAntigravityEntry parses Model Selection changes from USER_SETTINGS_CHANGE", () => {
+  const state = { items: [], tools: new Map(), lastTool: null, model: null, effort: null };
+  ingestAntigravityEntry(state, {
+    type: "USER_INPUT",
+    content: "<USER_SETTINGS_CHANGE>The user changed setting `Model Selection` from None to Gemini 4 Neon (Medium). No need to comment.</USER_SETTINGS_CHANGE><USER_REQUEST>hi</USER_REQUEST>",
+  });
+  assert.equal(state.model, "Gemini 4 Neon");
+  assert.equal(state.effort, "medium");
+  assert.equal(state.items.length, 1);
+  assert.equal(state.items[0].text, "hi");
 });
