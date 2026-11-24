@@ -196,3 +196,37 @@ test("settingChange reads Claude Code /model and /effort outputs", async () => {
   assert.strictEqual(settingChange("<local-command-stdout>Compacted</local-command-stdout>"), null);
   assert.strictEqual(settingChange("hello"), null);
 });
+
+test("needsInitialEarlierLoad triggers until at least ~one screen of conversation is loaded", async () => {
+  const { needsInitialEarlierLoad } = await import("../mods/agent-chat/transcript-blocks.js");
+  assert.strictEqual(needsInitialEarlierLoad([], 600), true);
+  assert.strictEqual(
+    needsInitialEarlierLoad([
+      { type: "tool", title: "exec_command" },
+      { type: "assistant", text: "Checking..." },
+      { type: "tool_group", summary: "Ran 12 commands" },
+      { type: "assistant", text: "REVIEW WP5 DONE" },
+    ], 600),
+    true,
+    "mid-turn output with no user message should load earlier"
+  );
+  assert.strictEqual(
+    needsInitialEarlierLoad([
+      { type: "user", text: "Review WP5" },
+      { type: "assistant", text: "REVIEW WP5 DONE" },
+    ], 600),
+    true,
+    "short exchange that does not fill a 600px viewport should load earlier"
+  );
+  const fullScreenBlocks = [
+    { type: "user", text: "First question" },
+    { type: "assistant", text: "Paragraph with details.\n\n".repeat(8) },
+    { type: "user", text: "Second question" },
+    { type: "assistant", text: "Paragraph with details.\n\n".repeat(8) },
+  ];
+  assert.strictEqual(
+    needsInitialEarlierLoad(fullScreenBlocks, 600),
+    false,
+    "conversation filling at least one viewport stops auto-loading"
+  );
+});

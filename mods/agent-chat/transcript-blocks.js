@@ -1581,3 +1581,27 @@ export function applyPrependAnchor(prevScrollY, prevHeight, newHeight) {
   const delta = Math.max(0, (newHeight || 0) - (prevHeight || 0));
   return Math.max(0, (prevScrollY || 0) + delta);
 }
+
+/**
+ * Returns true when an initial transcript tail does not yet fill approximately
+ * one viewport of meaningful conversation (e.g. empty, no user message, or
+ * estimated content height smaller than `viewportHeight`) and should auto-load
+ * an earlier batch.
+ *
+ * @param {Array<object>} blocks
+ * @param {number} [viewportHeight]
+ * @param {number} [columnWidth]
+ * @returns {boolean}
+ */
+export function needsInitialEarlierLoad(blocks, viewportHeight = 600, columnWidth = 760) {
+  if (!Array.isArray(blocks) || blocks.length === 0) return true;
+  const hasUser = blocks.some((b) => b?.type === "user");
+  if (!hasUser) return true;
+  const vh = Math.max(100, Number(viewportHeight) || 600);
+  let contentHeight = 36;
+  for (const b of blocks) {
+    contentHeight += estimateBlockHeight(b, null, columnWidth);
+    if (contentHeight >= vh) return false;
+  }
+  return true;
+}

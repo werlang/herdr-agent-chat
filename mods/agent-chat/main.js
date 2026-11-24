@@ -60,6 +60,7 @@ import {
   prependEarlierBlocks,
   preserveScrollOnResize,
   applyPrependAnchor,
+  needsInitialEarlierLoad,
 } from "./transcript-blocks.js";
 import { resolvePaneVisibility } from "./pane-visibility.js";
 import { demoBlocks } from "./demo-blocks.js";
@@ -858,9 +859,30 @@ export default class AgentChat extends View {
       this.transcriptCache.set(this.terminal, this.transcript);
       this.pruneTerminalCaches();
     }
-    const result = await this.transcript.refresh((live?.status || "idle") === "working");
+    let result = await this.transcript.refresh((live?.status || "idle") === "working");
     if (gen !== undefined && gen !== this._generation) return true;
     if (!result) return false;
+
+    // If the initial tail does not yet fill approximately one screen of
+    // meaningful conversation, pull earlier batches automatically.
+    const first = this._signature === "";
+    const vh = this._feedHeight > 0 ? this._feedHeight : 600;
+    const colW = Math.min(COLUMN, this._feedWidth > 0 ? this._feedWidth : COLUMN);
+    if (
+      first &&
+      typeof this.transcript.loadEarlier === "function" &&
+      this.transcript.hasEarlier &&
+      needsInitialEarlierLoad(result.blocks, vh, colW)
+    ) {
+      let loads = 0;
+      while (loads < 6 && this.transcript.hasEarlier && needsInitialEarlierLoad(result.blocks, vh, colW)) {
+        const earlier = await this.transcript.loadEarlier();
+        if (gen !== undefined && gen !== this._generation) return true;
+        loads++;
+        if (!earlier?.changed || !Array.isArray(earlier.blocks)) break;
+        result = { blocks: earlier.blocks, changed: true };
+      }
+    }
 
     // Antigravity can report a quota failure only on its current screen.
     const isAntigravity = this.transcript instanceof AntigravityTranscript;
@@ -888,7 +910,6 @@ export default class AgentChat extends View {
     const quotaText = quota?.text ?? null;
     const quotaChanged = quotaText !== this._transcriptQuota;
     this._transcriptQuota = quotaText;
-    const first = this._signature === "";
     if (!result.changed && !first && !quotaChanged && nextStatus === this.status) return true;
     this.status = nextStatus;
     let blocks = result.blocks;
