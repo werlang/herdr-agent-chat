@@ -188,6 +188,15 @@ purchase more credits or try again at 2:20 AM.
   ← for agents · ? for shortcuts                                           ⚠ 9 warnings · f2 to view`;
 assert.strictEqual(terminalQuotaFailure(codexQuotaScreen)?.text, codexQuotaMessage);
 assert.strictEqual(
+  terminalQuotaFailure(
+    codexQuotaScreen.replace(
+      "\n› Ask Codex to do anything",
+      "\n⚠ Heads up, you have less than 10% of your weekly limit left. Run /status for a breakdown.\n\n› Ask Codex to do anything"
+    )
+  )?.text,
+  codexQuotaMessage
+);
+assert.strictEqual(
   terminalQuotaFailure(`${codexQuotaScreen}
 
 Allow this command?

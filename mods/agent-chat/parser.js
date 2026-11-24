@@ -52,14 +52,15 @@ function codexQuotaFailure(lines) {
   let end = start + 1;
   while (end < lines.length) {
     const trimmed = lines[end].trim();
-    if (!trimmed || /^[›>]/.test(trimmed)) break;
+    if (!trimmed || /^[›>⚠]/.test(trimmed)) break;
     end++;
   }
   const tail = lines.slice(end).map((line) => line.trim()).filter(Boolean);
-  if (tail.length === 0 || !/^[›>](?:\s+Ask Codex to do anything)?$/.test(tail[0])) {
-    return null;
-  }
-  const footer = tail.slice(1);
+  const promptIdx = tail.findIndex((line) => /^[›>](?:\s+Ask Codex to do anything)?$/.test(line));
+  if (promptIdx < 0) return null;
+  const between = tail.slice(0, promptIdx);
+  if (!between.every((line) => /^⚠\s+/.test(line))) return null;
+  const footer = tail.slice(promptIdx + 1);
   if (footer.length > 3 || !footer.every((line) => /·|\? for shortcuts|for agents|^[─━]{4,}$/.test(line))) {
     return null;
   }
