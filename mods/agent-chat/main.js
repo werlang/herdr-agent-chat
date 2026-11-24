@@ -3203,13 +3203,17 @@ export default class AgentChat extends View {
     const agent = findAgent(this.terminal);
     const app = agentApp(agent);
     if (app === "claude-code") {
+      const seen = parseScreenModel(this.rawText, "claude-code");
       const tr = this.transcript instanceof ClaudeTranscript && this.transcript.terminal === this.terminal
         ? this.transcript
         : null;
-      const seen = parseScreenModel(this.rawText, "claude-code");
+      const pending = this.activeClaudePending();
+      const pendingModel = pending?.model
+        ? this.claudeModels.find((m) => m.id === pending.model)?.label || claudeModelLabel(pending.model, this.claudeModels)
+        : null;
       return {
-        model: claudeModelLabel(tr?.model, this.claudeModels) || seen?.model || null,
-        effort: effortLabel(tr?.effort || seen?.effort),
+        model: pendingModel || claudeModelLabel(tr?.model, this.claudeModels) || seen?.model || null,
+        effort: effortLabel(pending?.effort || tr?.effort || seen?.effort),
       };
     }
     if (app === "opencode") {
@@ -3328,24 +3332,48 @@ export default class AgentChat extends View {
     this.chooseModel(`/model ${targetId}`, cx);
   }
 
+  /** Remembers a Claude `/model` or `/effort` choice so the UI shows it before the transcript confirms. */
+  setClaudePending(command) {
+    const m = /^\/(model|effort)\s+(\S+)$/.exec(command);
+    const tr = this.transcript;
+    if (!m || !this.terminal || !(tr instanceof ClaudeTranscript)) return;
+    const prev = this.claudePending?.terminal === this.terminal ? this.claudePending : {};
+    this.claudePending = {
+      terminal: this.terminal,
+      model: prev.model,
+      effort: prev.effort,
+      [m[1]]: m[2],
+      base: { model: tr.model, effort: tr.effort },
+      at: Date.now(),
+    };
+  }
+
+  /** The pending Claude choice, or null once confirmed by the transcript or after 10 s. */
+  activeClaudePending() {
+    const p = this.claudePending;
+    if (!p) return null;
+    const tr = this.transcript instanceof ClaudeTranscript && this.transcript.terminal === p.terminal ? this.transcript : null;
+    const confirmed = tr && ((p.model && tr.model !== p.base.model) || (p.effort && tr.effort !== p.base.effort));
+    if (p.terminal !== this.terminal || confirmed || Date.now() - p.at > 10_000) {
+      this.claudePending = null;
+      return null;
+    }
+    return p;
+  }
+
   /** Switches models the way the agent itself does: a slash command typed into it. */
   chooseModel(command, cx) {
-    this.modelMenuOpen = false;
-    cx.notify();
-    if (!this.terminal) return;
-    if (this.attached > 0) {
-      this.notice = "Send or clear the attached image before switching models.";
-      cx.notify();
-      cx.timer.after(4000, (cx) => {
-        this.notice = null;
-        cx.notify();
-      });
-      return;
-    }
+    if (!this.beginModelSelection(cx)) return;
+    this.setClaudePending(command);
     cx.spawn(async (cx) => {
       try {
         await this.sendTextToTerminal(command);
         await this.update(cx);
+        // Claude confirms in its transcript a moment later: re-read quickly instead of waiting for the 1 s poll.
+        for (let i = 0; i < 6 && this.claudePending; i++) {
+          await new Promise((resolve) => cx.timer.after(300, resolve));
+          await this.update(cx);
+        }
       } catch (err) {
         this.flashNotice(err, cx);
       }
@@ -3581,9 +3609,10 @@ export default class AgentChat extends View {
       : null;
 
     const currentClaudeRawId =
-      this.transcript instanceof ClaudeTranscript && this.transcript.terminal === this.terminal
-        ? this.transcript.model
-        : null;
+      (isClaude && this.activeClaudePending()?.model) ||
+      (this.transcript instanceof ClaudeTranscript && this.transcript.terminal === this.terminal
+          ? this.transcript.model
+          : null);
     const currentClaudeModel = isClaude
       ? this.claudeModels.find(
           (m) =>
