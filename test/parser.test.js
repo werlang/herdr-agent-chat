@@ -172,3 +172,31 @@ Allow this command?
   2. Deny
 Esc to cancel`), null);
 assert.strictEqual(terminalQuotaFailure(agyQuotaScreen.replace("\n>\n", "\n> new request\n")), null);
+
+// Codex reports its usage limit failure above its idle composer.
+const codexQuotaMessage =
+  "You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage to purchase more credits or try again at 2:20 AM.";
+const codexQuotaScreen = `
+  + Show details
+
+■ You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage to
+purchase more credits or try again at 2:20 AM.
+
+› Ask Codex to do anything
+
+  GPT-6.2-Sol medium · /home/workspaces/gladcode2 · Revisar WP1 adversário · Main [default]
+  ← for agents · ? for shortcuts                                           ⚠ 9 warnings · f2 to view`;
+assert.strictEqual(terminalQuotaFailure(codexQuotaScreen)?.text, codexQuotaMessage);
+assert.strictEqual(
+  terminalQuotaFailure(`${codexQuotaScreen}
+
+Allow this command?
+  1. Allow once
+  2. Deny
+Esc to cancel`),
+  null
+);
+assert.strictEqual(
+  terminalQuotaFailure(codexQuotaScreen.replace("› Ask Codex to do anything", "› new request")),
+  null
+);

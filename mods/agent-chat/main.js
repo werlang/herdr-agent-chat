@@ -906,7 +906,12 @@ export default class AgentChat extends View {
     }
 
     const reportedStatus = findAgent(this.terminal)?.status || "idle";
-    const quota = isAntigravity && reportedStatus !== "working" ? terminalQuotaFailure(this.rawText) : null;
+    const screenText = isCodex
+      ? this.codexModelScreen?.terminal === this.terminal ? this.codexModelScreen.text : ""
+      : this.rawText;
+    const quota = (isAntigravity || isCodex) && reportedStatus !== "working"
+      ? terminalQuotaFailure(screenText)
+      : null;
     // A quota failure can appear only on the screen, before the transcript
     // or the agent status reflects it.
     const nextStatus = quota && reportedStatus === "blocked" ? "error" : reportedStatus;

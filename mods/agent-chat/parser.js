@@ -22,12 +22,17 @@ export function stripAnsi(str) {
 }
 
 /**
- * Reads Antigravity's current quota failure from the screen above its idle
- * composer. Other output below the error (such as a permission dialog) makes
- * it historical, even if the error is still visible.
+ * Reads an agent's current quota/usage-limit failure from the screen above its
+ * idle composer (Antigravity or Codex). Other output below the error (such as a
+ * permission dialog or a new prompt) makes it historical, even if the error is
+ * still visible.
  */
 export function terminalQuotaFailure(text) {
   const lines = stripAnsi(text).trimEnd().split("\n");
+  return antigravityQuotaFailure(lines) || codexQuotaFailure(lines);
+}
+
+function antigravityQuotaFailure(lines) {
   const errorId = lines.findLastIndex((line) => /^\s*Error ID:\s*[\da-f-]+\s*$/i.test(line));
   if (errorId < 1) return null;
   const tail = lines.slice(errorId + 1).map((line) => line.trim()).filter(Boolean);
@@ -39,6 +44,27 @@ export function terminalQuotaFailure(text) {
   const message = lines.slice(start, errorId).map((line) => line.trim()).join(" ");
   const match = message.match(/^⚠\s+(Individual quota reached\.[^⚠>]*\bResets in [\dhms]+\.)$/i);
   return match ? { start, text: match[1] } : null;
+}
+
+function codexQuotaFailure(lines) {
+  const start = lines.findLastIndex((line) => /^\s*■\s+You['’]ve hit your usage limit\b/i.test(line));
+  if (start < 0) return null;
+  let end = start + 1;
+  while (end < lines.length) {
+    const trimmed = lines[end].trim();
+    if (!trimmed || /^[›>]/.test(trimmed)) break;
+    end++;
+  }
+  const tail = lines.slice(end).map((line) => line.trim()).filter(Boolean);
+  if (tail.length === 0 || !/^[›>](?:\s+Ask Codex to do anything)?$/.test(tail[0])) {
+    return null;
+  }
+  const footer = tail.slice(1);
+  if (footer.length > 3 || !footer.every((line) => /·|\? for shortcuts|for agents|^[─━]{4,}$/.test(line))) {
+    return null;
+  }
+  const message = lines.slice(start, end).map((line) => line.trim()).join(" ").replace(/^■\s+/, "");
+  return message ? { start, text: message } : null;
 }
 
 const SPINNERS = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷";
