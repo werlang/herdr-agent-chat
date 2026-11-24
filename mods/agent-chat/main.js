@@ -473,6 +473,7 @@ export default class AgentChat extends View {
     this.historyCache = new Map();
     this.rawHistoryCache = new Map();
     this.terminalMetaCache = new Map();
+    this.transcriptCache = new Map();
     this.expanded = new Set();
     this.known = [];
     this._signature = "";
@@ -621,7 +622,35 @@ export default class AgentChat extends View {
     });
   }
 
-  /** Switches the view to another terminal, restoring its cached history. */
+  /**
+   * Removes cached state for closed terminals and enforces an LRU cap so
+   * memory stays bounded across long sessions.
+   * @param {number} [maxEntries]
+   */
+  pruneTerminalCaches(maxEntries = 25) {
+    const live = new Set(terminals().map((t) => t.address));
+    const caches = [this.transcriptCache, this.historyCache, this.rawHistoryCache, this.terminalMetaCache];
+    for (const cache of caches) {
+      if (live.size > 0) {
+        for (const key of cache.keys()) {
+          if (key !== this.terminal && !live.has(key)) cache.delete(key);
+        }
+      }
+      while (cache.size > maxEntries) {
+        let evicted = false;
+        for (const key of cache.keys()) {
+          if (key !== this.terminal) {
+            cache.delete(key);
+            evicted = true;
+            break;
+          }
+        }
+        if (!evicted) break;
+      }
+    }
+  }
+
+  /** Switches the chat view to a different agent terminal. */
   switchTo(address, cx) {
     if (!address) return;
     this.terminal = address;
@@ -632,7 +661,9 @@ export default class AgentChat extends View {
       this.terminalMetaCache.set(address, createdMs);
       this.historyCache.delete(address);
       this.rawHistoryCache.delete(address);
+      this.transcriptCache.delete(address);
     }
+    this.pruneTerminalCaches();
     // A poll still running for the previous agent must not land on this one:
     // a new generation makes it drop its result, and clearing the busy flag
     // lets the refresh below run now instead of being skipped.
@@ -642,12 +673,22 @@ export default class AgentChat extends View {
     this._contentHeight = 0;
     this._pendingPrepend = null;
     this.scrollY = 0;
-    this.transcript = null;
-    this.setBlocks(this.historyCache.get(address) || []);
+    const cachedTranscript = this.transcriptCache.get(address) || null;
+    if (cachedTranscript) {
+      this.transcriptCache.delete(address);
+      this.transcriptCache.set(address, cachedTranscript);
+    }
+    this.transcript = cachedTranscript;
+    const cachedBlocks = this.historyCache.get(address) || [];
+    if (cachedBlocks.length > 0) {
+      this.historyCache.delete(address);
+      this.historyCache.set(address, cachedBlocks);
+    }
+    this.setBlocks(cachedBlocks);
     this.rawText = this.rawHistoryCache.get(address) || "";
     this._transcriptQuota = null;
     this._screenAt = 0;
-    this._readFor = null;
+    this._readFor = cachedBlocks.length > 0 ? address : null;
     this.sendMode = this.loadSendMode(address);
     this._signature = "";
     this._blockKeys = "";
@@ -730,6 +771,9 @@ export default class AgentChat extends View {
         this.terminalMetaCache.set(this.terminal, createdMs);
         this.historyCache.delete(this.terminal);
         this.rawHistoryCache.delete(this.terminal);
+        this.transcriptCache.delete(this.terminal);
+        this.rawText = "";
+        this._screenAt = 0;
         this._transcriptQuota = null;
         this.transcript = null;
       }
@@ -805,7 +849,14 @@ export default class AgentChat extends View {
     }[agentApp(live)];
     if (!Reader) return false;
     if (!(this.transcript instanceof Reader) || this.transcript.terminal !== this.terminal) {
-      this.transcript = new Reader(this.terminal);
+      const cached = this.transcriptCache.get(this.terminal);
+      this.transcript =
+        cached instanceof Reader && cached.terminal === this.terminal
+          ? cached
+          : new Reader(this.terminal);
+      this.transcriptCache.delete(this.terminal);
+      this.transcriptCache.set(this.terminal, this.transcript);
+      this.pruneTerminalCaches();
     }
     const result = await this.transcript.refresh((live?.status || "idle") === "working");
     if (gen !== undefined && gen !== this._generation) return true;
