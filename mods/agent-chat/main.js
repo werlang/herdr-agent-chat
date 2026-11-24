@@ -543,6 +543,13 @@ export default class AgentChat extends View {
     this.probeFileEditor(cx);
     this._shown = this.isShown();
     if (this._shown) this.update(cx);
+    if (this._shown && !this.modelMenuOpen && !this.pickerOpen) {
+      cx.timer.after(50, () => {
+        if (this.isShown() && !this.modelMenuOpen && !this.pickerOpen) {
+          this.input.focus();
+        }
+      });
+    }
     cx.timer.every(1000, (cx) => this.poll(cx));
     cx.timer.every(15000, (cx) => this.probeFileEditor(cx));
   }
