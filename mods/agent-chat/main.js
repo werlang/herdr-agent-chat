@@ -31,6 +31,7 @@ import {
   fonts,
   checking,
   shared,
+  setShared,
   appHome,
   readTextFile,
 } from "herdr";
@@ -495,6 +496,10 @@ export default class AgentChat extends View {
     this._transcriptFetching = false;
     this.hasFileEditor = false;
     this._restoredScrollFor = null;
+    this.sendMode = this.loadSendMode();
+    this.messageQueues = new Map();
+    this.pendingSteers = new Map();
+    this._drainingQueue = false;
 
     ensureAgentChatKeyBindings(cx);
     this.handle = cx.focus_handle();
@@ -620,6 +625,7 @@ export default class AgentChat extends View {
   switchTo(address, cx) {
     if (!address) return;
     this.terminal = address;
+    this.status = "idle";
     const term = terminals().find((t) => t.address === address);
     const createdMs = term?.created_ms || 0;
     if (this.terminalMetaCache.get(address) !== createdMs) {
@@ -642,6 +648,7 @@ export default class AgentChat extends View {
     this._transcriptQuota = null;
     this._screenAt = 0;
     this._readFor = null;
+    this.sendMode = this.loadSendMode(address);
     this._signature = "";
     this._blockKeys = "";
     this._lastText = undefined;
@@ -775,6 +782,7 @@ export default class AgentChat extends View {
     } finally {
       if (gen === this._generation) {
         this._updating = false;
+        this.drainQueue(cx);
       }
     }
   }
@@ -854,6 +862,7 @@ export default class AgentChat extends View {
    * pill changes.
    */
   applyBlocks(blocks, cx) {
+    const steersCleared = this.reconcilePendingSteers(blocks);
     if (this._readFor !== this.terminal) {
       // The first read for this terminal landed: the empty state may now say
       // "start the conversation" instead of "loading".
@@ -862,7 +871,10 @@ export default class AgentChat extends View {
     }
     const blockKeys = blocks.map((b) => b.key).join(",");
     const signature = `${this.status}|${blockKeys}`;
-    if (signature === this._signature) return;
+    if (signature === this._signature) {
+      if (steersCleared) cx.notify();
+      return;
+    }
     const contentChanged = blockKeys !== this._blockKeys;
     this._signature = signature;
     this._blockKeys = blockKeys;
@@ -1366,15 +1378,15 @@ export default class AgentChat extends View {
   }
 
   /**
-   * Sends text to `this.terminal`, running `hc send` on the target machine
+   * Sends text to the given terminal, running `hc send` on the target machine
    * when remote so `hc` does not wrap the message in `<hc from="…/ppid:…">`.
    */
-  async sendTextToTerminal(text, { force = false } = {}) {
-    const machine = terminalMachine(this.terminal);
-    const localAddr = terminalLocalAddress(this.terminal);
+  async sendTextToTerminal(text, { force = false, terminal = this.terminal } = {}) {
+    const machine = terminalMachine(terminal);
+    const localAddr = terminalLocalAddress(terminal);
     const args = force ? ["send", "--force", localAddr, text] : ["send", localAddr, text];
     if (!machine) {
-      await hcOrThrow(["send", ...(force ? ["--force"] : []), this.terminal, text]);
+      await hcOrThrow(["send", ...(force ? ["--force"] : []), terminal, text]);
       return;
     }
     const res = await exec("hc", args, { on: machine });
@@ -1383,23 +1395,201 @@ export default class AgentChat extends View {
     }
   }
 
-  /** Sends the composer input or attached images to the agent terminal. */
+  /** Loads persisted send mode ("steer" | "queue") for a terminal, defaulting to "steer". */
+  loadSendMode(terminal = this.terminal) {
+    if (checking()) return "steer";
+    try {
+      const modes = shared("agent-chat.sendModes");
+      if (terminal && modes && typeof modes === "object" && !Array.isArray(modes)) {
+        const saved = modes[terminal];
+        if (saved === "queue" || saved === "steer") return saved;
+      }
+      return shared("agent-chat.sendMode") === "queue" ? "queue" : "steer";
+    } catch (_e) {
+      return "steer";
+    }
+  }
+
+  /** Toggles between "steer" (send immediately while working) and "queue" (hold until idle). */
+  toggleSendMode(cx) {
+    this.sendMode = this.sendMode === "queue" ? "steer" : "queue";
+    try {
+      const prev = shared("agent-chat.sendModes");
+      const next = prev && typeof prev === "object" && !Array.isArray(prev) ? { ...prev } : {};
+      if (this.terminal) next[this.terminal] = this.sendMode;
+      setShared("agent-chat.sendModes", next);
+    } catch (_e) {}
+    cx.notify();
+  }
+
+  /** Returns queued messages for the current terminal. */
+  currentQueue() {
+    return (this.terminal && this.messageQueues.get(this.terminal)) || [];
+  }
+
+  /** Returns in-flight steer messages for the current terminal that have not appeared in the feed yet. */
+  currentPendingSteers() {
+    return (this.terminal && this.pendingSteers.get(this.terminal)) || [];
+  }
+
+  /** Tracks a steer message sent while working so it stays visible until it lands in the feed. */
+  addPendingSteer(terminal, text) {
+    if (!terminal || !text) return null;
+    let list = this.pendingSteers.get(terminal);
+    if (!list) {
+      list = [];
+      this.pendingSteers.set(terminal, list);
+    }
+    const entry = {
+      text,
+      norm: text.replace(/\s+/g, " ").trim(),
+      at: Date.now(),
+      baseUserCount: this.blocks.filter((b) => b.type === "user").length,
+    };
+    list.push(entry);
+    return entry;
+  }
+
+  /** Dismisses a pending steer entry from the UI strip. */
+  removePendingSteer(index, cx) {
+    const list = this.currentPendingSteers();
+    if (index < 0 || index >= list.length) return;
+    list.splice(index, 1);
+    cx.notify();
+  }
+
+  /** Clears pending steer messages once a matching user turn appears in the feed. */
+  reconcilePendingSteers(blocks) {
+    if (!this.terminal) return false;
+    const list = this.pendingSteers.get(this.terminal);
+    if (!list || list.length === 0) return false;
+    const userBlocks = blocks.filter((b) => b.type === "user");
+    const before = list.length;
+    const remaining = list.filter((entry) => {
+      for (let i = Math.min(entry.baseUserCount, userBlocks.length); i < userBlocks.length; i++) {
+        const text = String(userBlocks[i]?.text || "").replace(/\s+/g, " ").trim();
+        if (text === entry.norm || (entry.norm && text.includes(entry.norm))) return false;
+      }
+      return true;
+    });
+    if (remaining.length === before) return false;
+    if (remaining.length === 0) this.pendingSteers.delete(this.terminal);
+    else this.pendingSteers.set(this.terminal, remaining);
+    return true;
+  }
+
+  /** Removes a queued message at `index` for the current terminal. */
+  removeQueued(index, cx) {
+    const queue = this.currentQueue();
+    if (index < 0 || index >= queue.length) return;
+    queue.splice(index, 1);
+    cx.notify();
+  }
+
+  /** Pulls a queued message back into the composer input so it can be edited. */
+  editQueued(index, cx) {
+    const queue = this.currentQueue();
+    if (index < 0 || index >= queue.length) return;
+    const [text] = queue.splice(index, 1);
+    const existing = (this.input.value() || "").trim();
+    this.input.set_value(existing ? `${text}\n${existing}` : text);
+    cx.notify();
+  }
+
+  /** Immediately sends a specific queued message (steering the agent). */
+  sendQueuedNow(index, cx) {
+    const terminal = this.terminal;
+    const queue = this.currentQueue();
+    if (!terminal || index < 0 || index >= queue.length) return;
+    const [text] = queue.splice(index, 1);
+    const steerEntry = this.status === "working" ? this.addPendingSteer(terminal, text) : null;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        await this.sendTextToTerminal(text, { terminal, force: this.status === "blocked" });
+        this.returnToLive(cx);
+        await this.update(cx);
+      } catch (err) {
+        if (steerEntry) {
+          const list = this.pendingSteers.get(terminal);
+          const idx = list ? list.indexOf(steerEntry) : -1;
+          if (idx >= 0) list.splice(idx, 1);
+        }
+        queue.unshift(text);
+        this.flashNotice(err, cx);
+      }
+      cx.notify();
+    });
+  }
+
+  /** Dispatches the next queued message once the agent is ready for another turn. */
+  drainQueue(cx) {
+    if (this._drainingQueue || this.demo || !this.terminal) return;
+    if (this.status === "working" || this.status === "blocked" || this.status === "error") return;
+    const terminal = this.terminal;
+    const queue = this.messageQueues.get(terminal);
+    if (!queue || queue.length === 0) return;
+    const next = queue.shift();
+    this._drainingQueue = true;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        await this.sendTextToTerminal(next, { terminal });
+        this.returnToLive(cx);
+        await this.update(cx);
+      } catch (err) {
+        queue.unshift(next);
+        this.flashNotice(err, cx);
+      } finally {
+        this._drainingQueue = false;
+        cx.notify();
+      }
+    });
+  }
+
+  /** Sends the composer input or attached images to the agent terminal, or queues while working. */
   send(cx) {
     const val = (this.input.value() || "").trim();
     if (this.demo || !this.terminal || (!val && !this.attached)) return;
+    if (this.status === "working" && this.sendMode === "queue" && val && !this.attached) {
+      let queue = this.messageQueues.get(this.terminal);
+      if (!queue) {
+        queue = [];
+        this.messageQueues.set(this.terminal, queue);
+      }
+      queue.push(val);
+      this.input.set_value("");
+      cx.notify();
+      return;
+    }
+    const terminal = this.terminal;
+    const steerEntry =
+      this.status === "working" && this.sendMode === "steer" && val && !this.attached
+        ? this.addPendingSteer(terminal, val)
+        : null;
+    if (steerEntry) {
+      this.input.set_value("");
+      cx.notify();
+    }
     cx.spawn(async (cx) => {
       try {
         if (!val) {
           // Only images attached: submit what the agent already holds.
-          await hcOrThrow(["keys", this.terminal, "enter"]);
+          await hcOrThrow(["keys", terminal, "enter"]);
         } else {
-          await this.sendTextToTerminal(val, { force: this.status === "blocked" });
+          await this.sendTextToTerminal(val, { terminal, force: this.status === "blocked" });
         }
-        this.input.set_value("");
+        if (!steerEntry) this.input.set_value("");
         this.attached = 0;
         this.returnToLive(cx);
         await this.update(cx);
       } catch (err) {
+        if (steerEntry) {
+          const list = this.pendingSteers.get(terminal);
+          const idx = list ? list.indexOf(steerEntry) : -1;
+          if (idx >= 0) list.splice(idx, 1);
+          if (!(this.input.value() || "").trim()) this.input.set_value(val);
+        }
         this.flashNotice(err, cx);
       }
       cx.notify();
@@ -3423,6 +3613,10 @@ export default class AgentChat extends View {
     const monoFont = settings().font_family ?? "JetBrains Mono";
 
     const approvalCard = this.renderPendingApprovalActions(t, cx);
+    const queued = this.currentQueue();
+    const pendingSteers = this.currentPendingSteers();
+    const pendingTotal = pendingSteers.length + queued.length;
+    const isQueueMode = this.sendMode === "queue";
     const picker = this.pickerOpen
       ? this.renderAgentPicker(t, monoFont, cx)
       : this.modelMenuOpen
@@ -3442,6 +3636,140 @@ export default class AgentChat extends View {
       .bg(t.background)
       // Pending approvals card docked above composer
       .when(Boolean(approvalCard), (el) => el.child(approvalCard))
+      // Pending steer & queued messages strip docked above composer
+      .when(pendingTotal > 0, (el) =>
+        el.child(
+          v_flex()
+            .id("queued-messages-card")
+            .w_full()
+            .max_w(COLUMN)
+            .mb(6)
+            .px(12)
+            .py(8)
+            .gap(4)
+            .rounded(12)
+            .bg(t.raised)
+            .border_1()
+            .border_color(t.border)
+            .child(
+              div()
+                .text_size(11)
+                .font_semibold()
+                .text_color(t.dim)
+                .child(pendingSteers.length > 0 ? `Pending (${pendingTotal})` : `Queued (${queued.length})`)
+            )
+            .children(
+              pendingSteers.map((entry, i) => {
+                const preview = entry.norm.length > 90 ? `${entry.norm.slice(0, 89)}…` : entry.norm;
+                return h_flex()
+                  .id(`steer-msg-${i}`)
+                  .w_full()
+                  .items_center()
+                  .justify_between()
+                  .gap(8)
+                  .px(8)
+                  .py(4)
+                  .rounded(6)
+                  .bg(t.background)
+                  .child(
+                    div()
+                      .flex_1()
+                      .min_w(0)
+                      .text_size(12)
+                      .text_color(t.foreground)
+                      .child(preview)
+                  )
+                  .child(
+                    h_flex()
+                      .flex_none()
+                      .items_center()
+                      .gap(6)
+                      .child(
+                        div()
+                          .px(6)
+                          .py(2)
+                          .rounded(4)
+                          .text_size(11)
+                          .font_medium()
+                          .text_color(t.accent)
+                          .child("Steering…")
+                      )
+                      .child(
+                        div()
+                          .id(`steer-remove-${i}`)
+                          .px(4)
+                          .cursor_pointer()
+                          .text_size(13)
+                          .text_color(t.dim)
+                          .hover((s) => s.text_color(t.ansi1 || "#ef4444"))
+                          .on_click((_e, cx) => this.removePendingSteer(i, cx))
+                          .child("×")
+                      )
+                  );
+              })
+            )
+            .children(
+              queued.map((msg, i) => {
+                const oneLine = msg.replace(/\s+/g, " ").trim();
+                const preview = oneLine.length > 90 ? `${oneLine.slice(0, 89)}…` : oneLine;
+                return h_flex()
+                  .id(`queued-msg-${i}`)
+                  .w_full()
+                  .items_center()
+                  .justify_between()
+                  .gap(8)
+                  .px(8)
+                  .py(4)
+                  .rounded(6)
+                  .bg(t.background)
+                  .child(
+                    div()
+                      .id(`queued-edit-${i}`)
+                      .flex_1()
+                      .min_w(0)
+                      .cursor_pointer()
+                      .rounded(4)
+                      .hover((s) => s.bg(t.hover))
+                      .on_click((_e, cx) => this.editQueued(i, cx))
+                      .text_size(12)
+                      .text_color(t.foreground)
+                      .child(preview)
+                  )
+                  .child(
+                    h_flex()
+                      .flex_none()
+                      .items_center()
+                      .gap(6)
+                      .child(
+                        div()
+                          .id(`queued-steer-${i}`)
+                          .px(6)
+                          .py(2)
+                          .rounded(4)
+                          .cursor_pointer()
+                          .text_size(11)
+                          .font_medium()
+                          .text_color(t.accent)
+                          .hover((s) => s.bg(t.hover))
+                          .on_click((_e, cx) => this.sendQueuedNow(i, cx))
+                          .child("Steer")
+                      )
+                      .child(
+                        div()
+                          .id(`queued-remove-${i}`)
+                          .px(4)
+                          .cursor_pointer()
+                          .text_size(13)
+                          .text_color(t.dim)
+                          .hover((s) => s.text_color(t.ansi1 || "#ef4444"))
+                          .on_click((_e, cx) => this.removeQueued(i, cx))
+                          .child("×")
+                      )
+                  );
+              })
+            )
+        )
+      )
       // Popover drawers (agent picker or model menu)
       .when(Boolean(picker), (el) =>
         el.child(
@@ -3524,7 +3852,7 @@ export default class AgentChat extends View {
               .items_center()
               .justify_between()
               .pt(4)
-              // Left: Attach & Plan Mode
+              // Left: Attach & Queue/Steer toggle
               .child(
                 h_flex()
                   .items_center()
@@ -3545,15 +3873,32 @@ export default class AgentChat extends View {
                   )
                   .child(
                     h_flex()
-                      .id("composer-plan-mode")
+                      .id("composer-send-mode")
                       .items_center()
+                      .gap(4)
                       .px(8)
                       .py(4)
                       .rounded(6)
                       .cursor_pointer()
-                      .hover((s) => s.bg(t.hover))
-                      .on_click((_e, cx) => this.chooseModel("/plan", cx))
-                      .child(div().text_size(12).font_medium().text_color(t.dim).child("Plan"))
+                      .when(isQueueMode, (el) => el.bg(withAlpha(t.accent, "18")))
+                      .hover((s) => s.bg(isQueueMode ? withAlpha(t.accent, "26") : t.hover))
+                      .on_click((_e, cx) => this.toggleSendMode(cx))
+                      .child(
+                        svg(
+                          isQueueMode
+                            ? "mods/agent-chat/icons/arrow-up.svg"
+                            : "mods/agent-chat/icons/corner-up-right.svg"
+                        )
+                          .size(13)
+                          .text_color(isQueueMode ? t.accent : t.dim)
+                      )
+                      .child(
+                        div()
+                          .text_size(12)
+                          .font_medium()
+                          .text_color(isQueueMode ? t.accent : t.dim)
+                          .child(isQueueMode ? "Queue" : "Steer")
+                      )
                   )
               )
               // Right: Model + Effort trigger & Primary Action button
@@ -3592,10 +3937,18 @@ export default class AgentChat extends View {
                       .child(renderEffortGlyph(currentModelInfo.effort, t, true))
                       .child(svg("mods/agent-chat/icons/chevron-down.svg").size(11).text_color(t.dim))
                   )
-                  // Primary Action Button (Stop / Steer / Send)
+                  // Primary Action Button (Stop / Queue / Steer / Send)
                   .child(
                     div()
-                      .id(working && !hasText ? "chat-stop" : working && hasText ? "chat-steer" : "chat-send")
+                      .id(
+                        working && !hasText
+                          ? "chat-stop"
+                          : working && hasText
+                          ? isQueueMode
+                            ? "chat-queue"
+                            : "chat-steer"
+                          : "chat-send"
+                      )
                       .size(32)
                       .flex()
                       .items_center()
@@ -3624,7 +3977,13 @@ export default class AgentChat extends View {
                         working && !hasText
                           ? svg("mods/agent-chat/icons/stop.svg").size(14).text_color("#ffffff")
                           : working && hasText
-                          ? svg("mods/agent-chat/icons/corner-up-right.svg").size(14).text_color("#ffffff")
+                          ? svg(
+                              isQueueMode
+                                ? "mods/agent-chat/icons/arrow-up.svg"
+                                : "mods/agent-chat/icons/corner-up-right.svg"
+                            )
+                              .size(14)
+                              .text_color("#ffffff")
                           : svg("mods/agent-chat/icons/send.svg")
                               .size(14)
                               .text_color(hasText ? "#ffffff" : t.foreground)
