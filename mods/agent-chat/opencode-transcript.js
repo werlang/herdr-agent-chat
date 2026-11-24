@@ -134,7 +134,7 @@ export class OpenCodeTranscript {
     const agent = agents().find((a) => a.address === this.terminal);
     const term = terminals().find((t) => t.address === this.terminal);
     const title = (agent?.title || "").replace(/^OC\s*\|\s*/, "").trim();
-    const cwd = term?.cwd || null;
+    const cwd = term?.foreground?.cwd || term?.cwd || null;
     const minCreatedMs =
       !this.sessionId && !title && Number(term?.created_ms) > 0
         ? Math.max(0, Number(term.created_ms) - 5000)
