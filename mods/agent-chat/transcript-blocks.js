@@ -666,6 +666,8 @@ function buildToolGroup(tools, { workedLabel = false, thoughts = [], workedMs: w
     type: "tool_group",
     count: tools.length,
     tools: tools.map((x) => ({
+      name: x.name,
+      input: x.input,
       title: x.title,
       detail: x.detail,
       status: x.status,

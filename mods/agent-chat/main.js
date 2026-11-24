@@ -1908,7 +1908,36 @@ export default class AgentChat extends View {
   }
 
   /**
-   * Pending approval banner card docked above the composer while the agent waits.
+   * Returns the active multiple-choice question when the agent is blocked on a
+   * `question` / `ask_question` / `AskUserQuestion` tool call, or null.
+   */
+  pendingQuestion() {
+    for (let i = this.blocks.length - 1; i >= 0; i--) {
+      const b = this.blocks[i];
+      const tools = b.type === "tool_group" ? b.tools || [] : b.type === "tool" ? [b] : [];
+      for (let j = tools.length - 1; j >= 0; j--) {
+        const tool = tools[j];
+        if (!tool || !/^(?:question|ask_question|askuserquestion|request_user_input)$/i.test(tool.name || "")) continue;
+        const qs = tool.input?.questions;
+        if (!Array.isArray(qs) || qs.length === 0) continue;
+        const q = qs[0];
+        if (!q?.question || !Array.isArray(q.options) || q.options.length === 0) continue;
+        const options = q.options
+          .map((opt) =>
+            typeof opt === "string"
+              ? { label: opt, description: "" }
+              : { label: String(opt?.label || opt?.text || "").trim(), description: String(opt?.description || "").trim() }
+          )
+          .filter((opt) => opt.label);
+        if (options.length > 0) return { question: String(q.question).trim(), options };
+      }
+      if (b.type === "user") break;
+    }
+    return null;
+  }
+
+  /**
+   * Renders quick approval actions or interactive decision options when the agent is blocked.
    */
   renderPendingApprovalActions(t, cx) {
     if (this.status !== "blocked") return null;
@@ -1932,6 +1961,82 @@ export default class AgentChat extends View {
         .hover((s) => s.opacity(0.85))
         .on_click((_e, cx) => onClick(cx))
         .child(label);
+
+    const pendingQ = this.pendingQuestion();
+    if (pendingQ) {
+      return v_flex()
+        .id("pending-question-card")
+        .w_full()
+        .max_w(COLUMN)
+        .mb(10)
+        .p(12)
+        .gap(8)
+        .rounded(12)
+        .bg(withAlpha(t.blocked, "14"))
+        .border_1()
+        .border_color(t.blocked)
+        .child(
+          h_flex()
+            .items_center()
+            .gap(8)
+            .child(svg("mods/agent-chat/icons/shield-alert.svg").size(16).flex_none().text_color(t.blocked))
+            .child(
+              div()
+                .flex_1()
+                .min_w(0)
+                .text_size(13)
+                .font_semibold()
+                .text_color(t.foreground)
+                .child(pendingQ.question)
+            )
+        )
+        .child(
+          v_flex()
+            .w_full()
+            .gap(4)
+            .children(
+              pendingQ.options.map((opt, idx) =>
+                v_flex()
+                  .id(`pending-q-opt-${idx}`)
+                  .w_full()
+                  .px(10)
+                  .py(7)
+                  .gap(2)
+                  .rounded(8)
+                  .bg(t.raised)
+                  .border_1()
+                  .border_color(idx === 0 ? t.blocked : t.border)
+                  .cursor_pointer()
+                  .hover((s) => s.bg(t.hover))
+                  .on_click((_e, cx) => {
+                    const keys = [...Array(idx).fill("down"), "enter"];
+                    this.sendKeys(keys, cx);
+                  })
+                  .child(
+                    div()
+                      .text_size(12.5)
+                      .font_medium()
+                      .text_color(t.foreground)
+                      .child(`${idx + 1}. ${opt.label}`)
+                  )
+                  .when(Boolean(opt.description), (el) =>
+                    el.child(
+                      div()
+                        .text_size(11.5)
+                        .text_color(t.dim)
+                        .child(opt.description)
+                    )
+                  )
+              )
+            )
+        )
+        .child(
+          h_flex()
+            .items_center()
+            .justify_end()
+            .child(btn("act-cancel", "Cancel (Esc)", (cx) => this.sendKey("esc", cx)))
+        );
+    }
 
     return v_flex()
       .id("pending-approval-card")
