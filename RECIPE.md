@@ -30,7 +30,7 @@ Inside any Herdr split pane or dedicated tab, you see a full visual Chat UI conn
 - `mods/agent-chat/` — the GPUI mod component (`main.js`, `parser.js`, `mod.json`, and 13 SVG icons).
 - `gpui-kit` / `gpui-base` — native GPU elements, flex layouts, `TextView.markdown`, and text input bindings.
 - `herdr` module — `hc` CLI execution, `agents()`, `terminals()`, `panes()`, `git`, `settings()`, and `theme()`.
-- `preview.png` — real window capture showing `agent-chat` running in Herdr.
+- `preview.png` — window capture of the `preview` demo (`--props '{"demo":"preview"}'`) running in Herdr.
 
 ## Watch out
 

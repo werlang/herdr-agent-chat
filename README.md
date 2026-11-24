@@ -50,6 +50,13 @@ herdr-app do pane.split --direction right --mod agent-chat --props '{"terminal":
 herdr-app do tab.new --name "Agent Chat" --mod agent-chat
 ```
 
+### Preview the chat without an agent
+```sh
+herdr-app do tab.new --name "Agent Chat" --mod agent-chat --props '{"demo":"preview"}'
+```
+
+The `preview` demo is the conversation shown in `preview.png`: a worked tool section, collapsible thinking, a checklist, a table, a copyable code block, changed-file chips, and a second turn. Use `{"demo":"opencode"}` for the longer tour of every element.
+
 ## Install
 
 Sync `mods/agent-chat` into `~/.config/herdr-app/mods/`:

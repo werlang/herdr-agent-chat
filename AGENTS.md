@@ -36,7 +36,13 @@ O mod `agent-chat` conecta diretamente ao terminal do agente (`$HC_TERMINAL_ID`)
 herdr-app do tab.new --name "Chat demo" --mod agent-chat --props '{"demo":"opencode"}'
 ```
 
-Props de inspeção: `demo` (`opencode` agrupa por turno, `claude` agrupa sequências), `part` (`a`, `b`, `short`, `edge`: partes do Markdown), `expand` (abre seções, pensamentos e ferramentas), `open` (`model` ou `agent`: já abre o seletor). Depois `herdr-app shot arquivo.png` salva o frame da janela. O chat só lê o transcript com a janela do Herdr ativa; com outro app em primeiro plano ele fica parado, de propósito.
+O preset `preview` é uma conversa em inglês, mais curta e realista, usada no `preview.png` do README:
+
+```sh
+herdr-app do tab.new --name "Agent Chat" --mod agent-chat --props '{"demo":"preview"}'
+```
+
+Props de inspeção: `demo` (`opencode` agrupa por turno, `claude` agrupa sequências, `preview` mostra o turno do README), `part` (`a`, `b`, `short`, `edge`: partes do Markdown; ignorado no `preview`), `expand` (abre seções, pensamentos e ferramentas), `open` (`model` ou `agent`: já abre o seletor). Depois `herdr-app shot arquivo.png` salva o frame da janela. O chat só lê o transcript com a janela do Herdr ativa; com outro app em primeiro plano ele fica parado, de propósito.
 
 ## Como abrir no Herdr
 
