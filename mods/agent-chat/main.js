@@ -430,6 +430,7 @@ export default class AgentChat extends View {
     this._pendingPrepend = null;
     this._feedWidth = -1;
     this._feedHeight = -1;
+    this._composerHeight = -1;
     this._drawnStatus = "";
     this._blockKeys = "";
     this.attached = 0;
@@ -1425,6 +1426,20 @@ export default class AgentChat extends View {
   }
 
   /**
+   * Keeps the floating picker anchored above the composer when it grows or
+   * shrinks (attachments, approvals, wrapped context). No layout is reserved
+   * for it, so only the stored height changes.
+   * @param {{ height: number }} size
+   * @param {any} cx
+   */
+  onComposerResize(size, cx) {
+    const height = Math.round(size.height);
+    if (height === this._composerHeight) return;
+    this._composerHeight = height;
+    if (this.pickerOpen || this.modelMenuOpen) cx.notify();
+  }
+
+  /**
    * Sets this.notice to an error message and clears it after 4000 ms.
    * @param {any} err
    * @param {any} cx
@@ -1773,7 +1788,7 @@ export default class AgentChat extends View {
     });
   }
 
-  renderAgentPicker(t, monoFont, cx) {
+  renderAgentPicker(t, monoFont, cx, maxH = 420) {
     if (!this.pickerOpen) return null;
 
     const liveAgents = agents();
@@ -1784,6 +1799,7 @@ export default class AgentChat extends View {
     return v_flex()
       .id("agent-picker-dropdown")
       .w_full()
+      .max_h(maxH)
       .p(10)
       .gap(8)
       .bg(t.raised || t.surface)
@@ -1793,6 +1809,7 @@ export default class AgentChat extends View {
       .child(
         h_flex()
           .id("pick-follow-focused")
+          .flex_none()
           .items_center()
           .justify_between()
           .px(8)
@@ -1837,6 +1854,9 @@ export default class AgentChat extends View {
       // Live Agents & Sub-agents List
       .child(
         v_flex()
+          .id("agent-picker-list")
+          .max_h(Math.max(80, maxH - 72))
+          .overflow_y_scrollbar()
           .gap(4)
           .child(div().px(4).text_size(10.5).font_semibold().text_color(t.dim).child("LIVE AGENTS & TERMINALS"))
           .children([
@@ -3547,9 +3567,10 @@ export default class AgentChat extends View {
   }
 
   /**
-   * Two-column Model & Reasoning Effort Popover.
+   * Two-column Model & Reasoning Effort Popover. `maxH` keeps the floating
+   * menu inside the room left above the composer.
    */
-  renderModelMenu(t, cx) {
+  renderModelMenu(t, cx, maxH = 420) {
     const agent = findAgent(this.terminal);
     const term = terminals().find((x) => x.address === this.terminal);
     const agentName = agent?.title || agent?.program?.name || term?.name || this.terminal || "No agent";
@@ -3855,7 +3876,7 @@ export default class AgentChat extends View {
     return v_flex()
       .id("model-menu")
       .w_full()
-      .max_h(420)
+      .max_h(maxH)
       .rounded(16)
       .bg(t.raised)
       .border_1()
@@ -3864,7 +3885,7 @@ export default class AgentChat extends View {
       .child(
         h_flex()
           .w_full()
-          .h(340)
+          .h(Math.min(340, Math.max(160, maxH - 2)))
           // Left Column: Models
           .child(
             v_flex()
@@ -3967,6 +3988,44 @@ export default class AgentChat extends View {
   }
 
   /**
+   * The agent picker / model menu floating above the composer. It is an
+   * absolute child of the chat column, so opening it never reserves space or
+   * moves the feed: the drawer covers the bottom of the conversation instead.
+   */
+  renderDrawerOverlay(t, cx) {
+    if (!this.pickerOpen && !this.modelMenuOpen) return null;
+    const monoFont = settings().font_family ?? "JetBrains Mono";
+    // Leave a margin of the feed visible; the menu scrolls its own list.
+    const maxH = Math.max(
+      180,
+      Math.min(420, (this._feedHeight > 0 ? this._feedHeight : 420) - 12)
+    );
+    const picker = this.pickerOpen
+      ? this.renderAgentPicker(t, monoFont, cx, maxH)
+      : this.renderModelMenu(t, cx, maxH);
+    const composerTop = (this._composerHeight > 0 ? this._composerHeight : 96) + 8;
+
+    return h_flex()
+      .id("chat-drawer-overlay")
+      .absolute()
+      .left(0)
+      .right(0)
+      .bottom(composerTop)
+      .px(16)
+      .justify_center()
+      .child(
+        div()
+          .w_full()
+          .max_w(COLUMN)
+          .rounded(16)
+          .border_1()
+          .border_color(t.border)
+          .overflow_hidden()
+          .child(picker)
+      );
+  }
+
+  /**
    * Main composer surface with the model/effort trigger, primary actions, and
    * the bottom workspace context strip.
    */
@@ -3974,20 +4033,12 @@ export default class AgentChat extends View {
     const rawVal = this.input.value() || "";
     const hasText = Boolean(rawVal.trim()) || this.attached > 0;
     const working = this.status === "working";
-    const agent = findAgent(this.terminal);
-    const monoFont = settings().font_family ?? "JetBrains Mono";
 
     const approvalCard = this.renderPendingApprovalActions(t, cx);
     const queued = this.currentQueue();
     const pendingSteers = this.currentPendingSteers();
     const pendingTotal = pendingSteers.length + queued.length;
     const isQueueMode = this.sendMode === "queue";
-    const picker = this.pickerOpen
-      ? this.renderAgentPicker(t, monoFont, cx)
-      : this.modelMenuOpen
-      ? this.renderModelMenu(t, cx)
-      : null;
-
     const currentModelInfo = this.currentModelInfo();
 
     return v_flex()
@@ -3999,6 +4050,7 @@ export default class AgentChat extends View {
       .pt(4)
       .pb(12)
       .bg(t.background)
+      .on_size_change((size, cx) => this.onComposerResize(size, cx))
       // Pending approvals card docked above composer
       .when(Boolean(approvalCard), (el) => el.child(approvalCard))
       // Pending steer & queued messages strip docked above composer
@@ -4133,20 +4185,6 @@ export default class AgentChat extends View {
                   );
               })
             )
-        )
-      )
-      // Popover drawers (agent picker or model menu)
-      .when(Boolean(picker), (el) =>
-        el.child(
-          div()
-            .w_full()
-            .max_w(COLUMN)
-            .mb(8)
-            .rounded(16)
-            .border_1()
-            .border_color(t.border)
-            .overflow_hidden()
-            .child(picker)
         )
       )
       // Composer surface card
@@ -4284,9 +4322,13 @@ export default class AgentChat extends View {
                       .when(this.modelMenuOpen, (el) => el.bg(t.hover))
                       .hover((s) => s.bg(t.hover))
                       .on_click((_e, cx) => {
-                        this.modelMenuOpen = !this.modelMenuOpen;
-                        this.pickerOpen = false;
-                        if (this.modelMenuOpen) this.refreshModels(cx);
+                        if (this.modelMenuOpen) {
+                          this.closeModelMenu();
+                        } else {
+                          this.modelMenuOpen = true;
+                          this.pickerOpen = false;
+                          this.refreshModels(cx);
+                        }
                         cx.notify();
                       })
                       .child(
@@ -4388,7 +4430,7 @@ export default class AgentChat extends View {
                   .hover((s) => s.bg(t.hover))
                   .on_click((_e, cx) => {
                     this.pickerOpen = !this.pickerOpen;
-                    this.modelMenuOpen = false;
+                    this.closeModelMenu();
                     cx.notify();
                   })
                   .child(svg("mods/agent-chat/icons/terminal.svg").size(11.5).flex_none().text_color(t.dim))
@@ -4510,6 +4552,10 @@ export default class AgentChat extends View {
       this.renderPendingApprovalActions(t, cx),
       this.renderComposer(t, cx)
     );
+    out.push(this.renderDrawerOverlay(t, cx));
+    this.pickerOpen = false;
+    out.push(this.renderDrawerOverlay(t, cx));
+    this.pickerOpen = true;
     out.push(this.renderFeed(t, monoFont, cx), this.renderEmptyFeed(t));
 
     this.status = "working";
@@ -4590,9 +4636,14 @@ export default class AgentChat extends View {
       })
       .on_action("agent-chat.scroll-bottom", (_e, cx) => this.returnToLive(cx))
       .on_key_down((event, cx) => this.handleKeyDown(event, cx))
+      .relative()
       .size_full()
       .bg(t.background)
       .child(this.renderFeed(t, monoFont, cx))
-      .child(this.renderComposer(t, cx));
+      .child(this.renderComposer(t, cx))
+      // Floating, in the root so it covers the feed instead of shrinking it.
+      .when(this.pickerOpen || this.modelMenuOpen, (el) =>
+        el.child(this.renderDrawerOverlay(t, cx))
+      );
   }
 }
