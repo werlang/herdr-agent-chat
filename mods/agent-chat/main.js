@@ -1492,9 +1492,9 @@ export default class AgentChat extends View {
   async sendTextToTerminal(text, { force = false, terminal = this.terminal } = {}) {
     const machine = terminalMachine(terminal);
     const localAddr = terminalLocalAddress(terminal);
-    const args = force ? ["send", "--force", localAddr, text] : ["send", localAddr, text];
+    const args = ["send", ...(force ? ["--force"] : []), "--", localAddr, text];
     if (!machine) {
-      await hcOrThrow(["send", ...(force ? ["--force"] : []), terminal, text]);
+      await hcOrThrow(["send", ...(force ? ["--force"] : []), "--", terminal, text]);
       return;
     }
     const res = await exec("hc", args, { on: machine });
