@@ -1464,13 +1464,20 @@ export default class AgentChat extends View {
     });
   }
 
-  /** Forwards a non-text paste (an image) to the agent as Ctrl+V. */
+  /** Forwards a non-text paste (an image) to the agent as Ctrl+V and marks its position in the input. */
   pasteImage(cx) {
     if (!this.terminal) return;
     cx.spawn(async (cx) => {
       try {
         await hcOrThrow(["keys", this.terminal, "ctrl+v"]);
-        this.attached = (this.attached || 0) + 1;
+        const n = (this.attached || 0) + 1;
+        this.attached = n;
+        const token = { id: `image-${n}`, text: `[Image #${n}]`, label: `🖼 Image #${n}` };
+        if (typeof this.input.replace_with_token === "function") {
+          this.input.replace_with_token(token);
+        } else {
+          this.input.replace(token.text);
+        }
       } catch (err) {
         this.flashNotice(err, cx);
       }

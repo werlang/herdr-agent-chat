@@ -95,10 +95,24 @@ export function ingestCodexEntry(state, entry) {
   const item = payload.item;
 
   if (item.type === "UserMessage") {
-    const raw = codexMessageText(item.content ?? item.text ?? "");
-    if (!raw || CODEX_HARNESS_BLOCK.test(raw)) return;
-    const text = stripHarnessXml(raw);
-    if (!text || /^\/model\b/i.test(text)) return;
+    const content = item.content ?? item.text ?? "";
+    const raw = codexMessageText(content);
+    const images = Array.isArray(content)
+      ? content.filter((p) => p && /^(?:image|local_?image|input_image)$/i.test(String(p.type || ""))).length
+      : 0;
+    if (!images && (!raw || CODEX_HARNESS_BLOCK.test(raw))) return;
+    let text = raw && !CODEX_HARNESS_BLOCK.test(raw) ? stripHarnessXml(raw) : "";
+    if (/^\/model\b/i.test(text) && !images) return;
+    // Codex prepends `[Image #N]` to the prompt on Ctrl+V; when the composer
+    // also placed `[Image #N]` inline in the message, strip the leading duplicate.
+    const leading = text.match(/^((?:\[Image #\d+\]\s*)+)([\s\S]+)$/);
+    if (leading && /\[Image #\d+\]/.test(leading[2])) {
+      text = leading[2].trim();
+    }
+    if (images && !/\[Image #\d+\]/.test(text)) {
+      text = `${text}${text ? "\n\n" : ""}${images === 1 ? "🖼 1 image" : `🖼 ${images} images`}`;
+    }
+    if (!text) return;
     state.items.push({ type: "user", text });
     return;
   }

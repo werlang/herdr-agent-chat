@@ -75,8 +75,15 @@ export function ingestAntigravityEntry(state, entry) {
         }
       }
     }
-    const text = stripHarnessXml(raw);
-    if (!text || /^\/(?:model|effort)\b/i.test(text)) return;
+    let text = stripHarnessXml(raw);
+    const images = Array.isArray(entry.media)
+      ? entry.media.filter((m) => m && (!m.mime_type || String(m.mime_type).startsWith("image/"))).length
+      : 0;
+    if (/^\/(?:model|effort)\b/i.test(text) && !images) return;
+    if (images && !/\[Image #\d+\]/.test(text)) {
+      text = `${text}${text ? "\n\n" : ""}${images === 1 ? "🖼 1 image" : `🖼 ${images} images`}`;
+    }
+    if (!text) return;
     state.items.push({ type: "user", text });
     return;
   }
