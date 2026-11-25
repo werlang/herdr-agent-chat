@@ -230,3 +230,24 @@ test("needsInitialEarlierLoad triggers until at least ~one screen of conversatio
     "conversation filling at least one viewport stops auto-loading"
   );
 });
+
+test("itemsToBlocks collapses consecutive retry/duplicate error notices", () => {
+  const err = (n) =>
+    `API error (attempt ${n}): request failed: Post "https://oauth2.googleapis.com/token": no such host`;
+  const blocks = itemsToBlocks(
+    [
+      { type: "user", text: "clicking inside the chat ui should also count as reading the pane" },
+      { type: "notice", tone: "error", text: err(1) },
+      { type: "notice", tone: "error", text: err(2) },
+      { type: "notice", tone: "error", text: err(3) },
+      { type: "notice", tone: "error", text: "Different error" },
+    ],
+    false
+  );
+  assert.strictEqual(blocks.length, 3);
+  assert.strictEqual(blocks[1].type, "notice");
+  assert.strictEqual(blocks[1].text, err(3));
+  assert.strictEqual(blocks[1].count, 3);
+  assert.strictEqual(blocks[2].text, "Different error");
+  assert.strictEqual(blocks[2].count, undefined);
+});

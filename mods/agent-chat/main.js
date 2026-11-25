@@ -2468,6 +2468,23 @@ export default class AgentChat extends View {
                 .text_color(color)
                 .child(block.text || "")
             )
+            .when(block.count > 1, (el) =>
+              el.child(
+                div()
+                  .flex_none()
+                  .px(6)
+                  .py(1)
+                  .rounded_full()
+                  .bg(withAlpha(color, "22"))
+                  .border_1()
+                  .border_color(withAlpha(color, "44"))
+                  .font_family(monoFont)
+                  .text_size(10.5)
+                  .line_height("14px")
+                  .text_color(color)
+                  .child(`×${block.count}`)
+              )
+            )
         );
       }
 

@@ -773,6 +773,53 @@ function itemsToBlocksByTurn(items, agentWorking) {
     out.push({ ...it });
   }
   finishTurn();
+  return collapseConsecutiveNotices(out);
+}
+
+/**
+ * Normalizes a notice string so consecutive retry attempts of the same
+ * error (e.g. "API error (attempt 1): ..." vs "API error (attempt 2): ...")
+ * collapse into one row instead of flooding the feed.
+ * @param {string} text
+ * @returns {string}
+ */
+function normalizeNoticeKey(text) {
+  return String(text || "")
+    .replace(/\(\s*(?:attempt|retry|try)\s+\d+(?:\s*(?:\/|of)\s*\d+)?\s*\)/gi, "")
+    .replace(/\b(?:attempt|retry|try)\s+\d+(?:\s*(?:\/|of)\s*\d+)?\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * Collapses consecutive warning/error notices with the same normalized message,
+ * keeping the latest text and recording `count` when > 1.
+ * @param {Array<object>} blocks
+ * @returns {Array<object>}
+ */
+function collapseConsecutiveNotices(blocks) {
+  const out = [];
+  for (const block of blocks) {
+    const prev = out[out.length - 1];
+    if (
+      block?.type === "notice" &&
+      (block.tone === "error" || block.tone === "warning") &&
+      prev?.type === "notice" &&
+      prev.tone === block.tone
+    ) {
+      const key = normalizeNoticeKey(block.text);
+      if (key && key === normalizeNoticeKey(prev.text)) {
+        out[out.length - 1] = {
+          ...prev,
+          ...block,
+          count: (prev.count || 1) + 1,
+        };
+        continue;
+      }
+    }
+    out.push(block);
+  }
   return out;
 }
 
@@ -836,7 +883,7 @@ export function itemsToBlocks(items, agentWorking) {
     }
   }
   flush();
-  return out;
+  return collapseConsecutiveNotices(out);
 }
 
 /**
