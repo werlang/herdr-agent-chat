@@ -487,6 +487,7 @@ export default class AgentChat extends View {
     this.input.on("paste_other", (_e, cx) => this.pasteImage(cx));
     this.input.on("focus", (_e, cx) => {
       this.inputFocused = true;
+      this.markTerminalRead(cx, { restoreInput: true });
       cx.notify();
     });
     this.input.on("blur", (_e, cx) => {
@@ -4654,6 +4655,39 @@ export default class AgentChat extends View {
     return v_flex().children(out.filter(Boolean));
   }
 
+  /**
+   * Marks the connected terminal as read in Herdr when it is in "done" state,
+   * then restores focus back to this chat pane (and composer if it was focused).
+   * @param {any} cx
+   * @param {{ restoreInput?: boolean }} [opts]
+   */
+  markTerminalRead(cx, { restoreInput = false } = {}) {
+    if (!this.terminal || this.demoMode || this._markingRead) return;
+    const agent = agents().find((a) => a.address === this.terminal);
+    if (agent?.status !== "done" && this.status !== "done") return;
+
+    const wasInputFocused = restoreInput || this.inputFocused;
+    const myPane = this._paneId;
+    this._markingRead = true;
+    try {
+      run("pane.focus", { terminal: this.terminal });
+      if (myPane) {
+        run("pane.focus", { pane: myPane });
+      }
+      cx.timer(20, (tcx) => {
+        this._markingRead = false;
+        if (wasInputFocused) {
+          this.input.focus();
+        } else {
+          this.handle.focus();
+        }
+        tcx.notify();
+      });
+    } catch {
+      this._markingRead = false;
+    }
+  }
+
   render(cx) {
     const t = theme();
     const monoFont = settings().font_family ?? "JetBrains Mono";
@@ -4705,6 +4739,7 @@ export default class AgentChat extends View {
       .id("agent-chat-view")
       .track_focus(this.handle)
       .key_context("AgentChat")
+      .on_mouse_down("left", (_e, cx) => this.markTerminalRead(cx))
       .on_action("agent-chat.page-up", (_e, cx) => this.pageScroll(1, cx))
       .on_action("agent-chat.page-down", (_e, cx) => this.pageScroll(-1, cx))
       .on_action("agent-chat.scroll-top", (_e, cx) => {
