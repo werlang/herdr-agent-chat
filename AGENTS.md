@@ -1,65 +1,65 @@
 # herdr-agent-chat
 
-Fonte da verdade do mod `agent-chat`: um Chat UI nativo dentro do Herdr para acompanhar, inspecionar e conversar com agentes de codificação CLI (Claude Code, Antigravity, OpenCode, Codex, Aider, etc.).
+Source of truth for the `agent-chat` mod: a native Chat UI inside Herdr to follow, inspect, and talk with CLI coding agents (Claude Code, Antigravity, OpenCode, Codex, Aider, etc.).
 
-## Regra: sempre atualizar a pasta live do Herdr
+## Rule: always update Herdr's live folder
 
-O Herdr lê os mods de `~/.config/herdr-app/mods/<nome>`. Depois de **qualquer** mudança aqui:
+Herdr loads mods from `~/.config/herdr-app/mods/<name>`. After **any** change here:
 
 ```sh
 ./sync.sh
 ```
 
-O script copia `mods/agent-chat` para a pasta live e roda `herdr-app check`. Não edite a pasta live diretamente.
+The script copies `mods/agent-chat` to the live folder and runs `herdr-app check`. Do not edit the live folder directly.
 
-## Como funciona
+## How it works
 
-O mod `agent-chat` conecta diretamente ao terminal do agente (`$HC_TERMINAL_ID`):
+The `agent-chat` mod connects directly to the agent's terminal (`$HC_TERMINAL_ID`):
 
-- **Seletor de Agentes & Follow Mode**: Permite alternar entre qualquer agente ou sub-agente ativo (na space atual ou em outras spaces), criar novos agentes (`hc spawn claude`) ou seguir automaticamente o agente focado (`followFocused`).
-- **Alternância de Visão (Chat View vs. Original View)**: Botão seletor no topo para alternar instantaneamente entre o feed visual formatado e o stream original do terminal com contagem de linhas e botão de cópia integral.
-- **Leitura do Stream & Cache de Histórico**: Faz polling via `hc read <terminal> --lines 200 --json`, preservando turnos anteriores em cache quando `hc read` retorna apenas a tela visível (`complete: false`) durante o estado `working`, e parseia o fluxo (`parser.js`) em turnos de usuário, pensamento (*thought*), invocações/grupos de ferramentas (*tool* / *tool_group*) e respostas do assistente em Markdown nativo (`TextView.markdown`).
-- **Scroll Fixo no Fundo (Sticky Tail)**: O feed é uma coluna invertida de scroll, então o turno mais novo fica no fundo e acompanha o streaming nativamente. Rolar para cima congela a janela de leitura (mensagens novas não movem a tela); o pill "Scroll to end" volta ao fim e "Load earlier messages" pagina turnos antigos. Só uma janela limitada de linhas é construída, mantendo sessões longas baratas.
-- **Status em Tempo Real & Controles de Painel**: Mostra o badge de status do agente (`working` com spinner, `blocked` "Needs you", `done`, `error`, `idle`), branch Git, diretório atual e botões rápidos para `Peek` (`pane.peek`), `Focus` (`terminal.focus`) e cópia de respostas (`cx.write_to_clipboard`).
-- **Polling só Quando Visível**: O Herdr mantém os timers de uma cópia oculta (outra tab, settled, atrás de um zoom). O mod checa `window().active`, `focused()` e `panes()` a cada segundo e só lê transcript/`hc read` quando o pane está realmente na tela; cópias ocultas não gastam CPU nem I/O e o spinner de `working` fica estático.
-- **Ações Rápidas de Aprovação**: Quando o agente está em estado de espera (`blocked`), exibe botões contextuais imediatos: `Approve (Enter)`, `Yes (y)`, `No (n)`, `Cancel (Esc)` disparando `hc keys` ou `hc send`.
-- **Interação Bidirecional & Interrupção**: O compositor é um `Textarea` multi-linha: **Enter envia** a mensagem via `hc send <terminal> <text>` e **Shift+Enter quebra a linha** (o `submit` chega com `event.shift`). O botão **Stop** interrompe execuções em andamento via `hc interrupt <terminal>`.
-- **Seletor de Modelo**: Claude usa os comandos `/model <id>` e `/effort <nível>`, com a mesma lista do picker nativo (Default, Opus 5.5, Sonnet 5.5, Fable 5.1, Haiku 5.5; "More models…" abre o `/model` nativo) e os cinco níveis `low`/`medium`/`high`/`xhigh`/`max`. As trocas viram avisos no feed (lidos do `<local-command-stdout>` do transcript) e atualizam o modelo atual na hora; antes da primeira resposta o modelo vem do banner da tela. Uma sessão Claude recém-aberta (sem `.jsonl` ainda, e às vezes sem `app` reportado — usa `program.key`) mostra o estado vazio em vez do banner/placeholder; o OpenCode é lido e trocado pela API do próprio servidor — `opencode api GET /api/model` e `/api/provider` montam a lista agrupada por provider (o provider do modelo atual vem primeiro), e `POST /api/session/<sessionID>/model` troca o modelo da sessão ativa (o `sessionID` vem do `OpenCodeTranscript`). No OpenCode o **effort é a `variant` do modelo**: a coluna de effort lista as `variants` do modelo atual e troca pela mesma chamada (`{ model: { id, providerID, variant } }`); não existe `/effort`, digitar isso enviaria uma mensagem. A fonte da verdade do modelo atual é a linha `session_v2` (uma troca aparece nela antes de existir nova resposta); sem sessão ainda, o modelo é lido da tela do TUI. Se a API não estiver disponível, cai no picker nativo do terminal (`/models`). O menu de modelos e o seletor de agente flutuam por cima do feed (overlay `absolute` na raiz, ancorado na altura medida do composer por `on_size_change`), então abrir qualquer um não reserva espaço nem desloca a conversa; a altura do menu é limitada pelo espaço do feed e as listas rolam dentro dele.
-- **Pensamento, ferramentas e avisos**: cada pensamento é uma linha recolhível (ícone de cérebro + resumo) cujo corpo é Markdown num painel limitado; cada chamada de ferramenta também abre sozinha, com a saída dobrada por padrão. Uma sequência de pensamentos e ferramentas vira uma seção ("Worked for 12s · Ran 3 commands…"; falhas aparecem como a etiqueta "N failed", não pintam o cabeçalho). Erros do provedor (`error.message`), interrupções, trocas de modelo e compactações viram uma linha discreta no turno (`noticeItem` em `opencode-data.js`). Mensagens entre agentes (`<hc from="tX">…</hc>`) são desembrulhadas e mostram "from tX".
-- **Texto das respostas**: a fonte padrão de UI (Geist) não tem negrito/itálico aqui, então o corpo do feed usa a primeira família instalada de `body-font.js` (Inter, SF Pro Text, Helvetica Neue, Arial). O `TextView.markdown` nativo não desenha imagens nem colore diffs e não aceita estilos; linhas só com imagem viram uma linha de anexo (alt + caminho), já que o host só carrega imagens da própria pasta do app. Blocos de código têm cabeçalho próprio com a linguagem e um botão **Copy**; o clique direito dentro do bloco copia só o snippet e mostra "Copied", sem disparar o copiar da mensagem inteira.
+- **Agent Selector & Follow Mode**: Switch between any active agent or sub-agent (in the current space or other spaces), spawn new agents (`hc spawn claude`), or automatically follow the focused agent (`followFocused`).
+- **View Toggle (Chat View vs. Original View)**: Top toggle button to switch instantly between the formatted visual feed and the raw terminal stream with line count and full copy button.
+- **Stream Reading & History Cache**: Polls via `hc read <terminal> --lines 200 --json`, preserving previous turns in cache when `hc read` returns only the visible screen (`complete: false`) during `working` state, and parses the stream (`parser.js`) into user turns, thoughts (*thought*), tool invocations/groups (*tool* / *tool_group*), and assistant replies in native Markdown (`TextView.markdown`).
+- **Sticky Tail Scroll**: The feed is an inverted scroll column, so the newest turn stays at the bottom and follows streaming natively. Scrolling up freezes the reading window (new messages do not jump the screen); the "Scroll to end" pill jumps back to the bottom and "Load earlier messages" paginates older turns. Only a bounded window of rows is built, keeping long sessions cheap.
+- **Real-Time Status & Panel Controls**: Shows the agent status badge (`working` with spinner, `blocked` "Needs you", `done`, `error`, `idle`), Git branch, current directory, and quick buttons for `Peek` (`pane.peek`), `Focus` (`terminal.focus`), and copying replies (`cx.write_to_clipboard`).
+- **Poll Only When Visible**: Herdr keeps timers alive for hidden instances (another tab, settled, behind a zoom). The mod checks `window().active`, `focused()`, and `panes()` every second and only reads transcripts / `hc read` when the pane is actually on screen; hidden instances spend no CPU or I/O and the `working` spinner stays static.
+- **Quick Approval Actions**: When the agent is waiting (`blocked`), displays immediate contextual buttons: `Approve (Enter)`, `Yes (y)`, `No (n)`, `Cancel (Esc)` firing `hc keys` or `hc send`.
+- **Bidirectional Interaction & Interruption**: The composer is a multi-line `Textarea`: **Enter sends** the message via `hc send <terminal> <text>` and **Shift+Enter inserts a newline** (`submit` arrives with `event.shift`). The **Stop** button interrupts running executions via `hc interrupt <terminal>`.
+- **Model Selector**: Claude uses `/model <id>` and `/effort <level>` commands with the same list as the native picker (Default, Opus 5.5, Sonnet 5.5, Fable 5.1, Haiku 5.5; "More models…" opens the native `/model`) and the five levels `low`/`medium`/`high`/`xhigh`/`max`. Switches become notices in the feed (read from `<local-command-stdout>` in the transcript) and update the current model immediately; before the first reply, the model comes from the screen banner. A newly opened Claude session (no `.jsonl` yet, and sometimes no `app` reported — uses `program.key`) shows the empty state instead of the banner/placeholder. OpenCode is read and switched via its own server API — `opencode api GET /api/model` and `/api/provider` build the provider-grouped list (the current model's provider comes first), and `POST /api/session/<sessionID>/model` switches the active session's model (`sessionID` comes from `OpenCodeTranscript`). In OpenCode, **effort is the model's `variant`**: the effort column lists the current model's `variants` and switches via the same call (`{ model: { id, providerID, variant } }`); there is no `/effort` command, typing it would send a chat message. The source of truth for the current model is the `session_v2` row (a switch appears there before any new reply exists); with no session yet, the model is read from the TUI screen. If the API is unavailable, it falls back to the terminal's native picker (`/models`). Both the model menu and the agent selector float above the feed (`absolute` overlay at the root, anchored to the measured composer height via `on_size_change`), so opening either never reserves space or shifts the conversation; menu height is capped by the feed space and lists scroll inside it.
+- **Thoughts, tools, and notices**: Each thought is a collapsible row (brain icon + summary) whose body is Markdown in a bounded panel; each tool call also opens independently with output collapsed by default. A sequence of thoughts and tools becomes a section ("Worked for 12s · Ran 3 commands…"; failures appear as a "N failed" badge rather than tinting the header). Provider errors (`error.message`), interruptions, model switches, and compactions become a subtle line in the turn (`noticeItem` in `opencode-data.js`). Inter-agent messages (`<hc from="tX">…</hc>`) are unwrapped and show "from tX".
+- **Response text**: The default UI font (Geist) lacks bold/italic here, so the feed body uses the first installed family from `body-font.js` (Inter, SF Pro Text, Helvetica Neue, Arial). Native `TextView.markdown` does not render images or color diffs and does not accept styles; image-only lines become an attachment row (alt + path), since the host only loads images from the app's own folder. Code blocks have their own header with the language and a **Copy** button; right-clicking inside the block copies just the snippet and shows "Copied", without triggering whole-message copy.
 
-## Demo e inspeção visual
+## Demo and visual inspection
 
-`demo-blocks.js` tem uma conversa fixa com todos os elementos (títulos, listas, tabela, citação, código, tarefas, erros). Abre sem agente, em aba própria:
+`demo-blocks.js` has a fixed conversation with all elements (headings, lists, table, blockquote, code, tasks, errors). Opens without an agent, in its own tab:
 
 ```sh
 herdr-app do tab.new --name "Chat demo" --mod agent-chat --props '{"demo":"opencode"}'
 ```
 
-O preset `preview` é uma conversa em inglês, mais curta e realista, usada no `preview.png` do README:
+The `preview` preset is a shorter, realistic English conversation used for the README's `preview.png`:
 
 ```sh
 herdr-app do tab.new --name "Agent Chat" --mod agent-chat --props '{"demo":"preview"}'
 ```
 
-Props de inspeção: `demo` (`opencode` agrupa por turno, `claude` agrupa sequências, `preview` mostra o turno do README), `part` (`a`, `b`, `short`, `edge`: partes do Markdown; ignorado no `preview`), `expand` (abre seções, pensamentos e ferramentas), `open` (`model` ou `agent`: já abre o seletor). Depois `herdr-app shot arquivo.png` salva o frame da janela. O chat só lê o transcript com a janela do Herdr ativa; com outro app em primeiro plano ele fica parado, de propósito.
+Inspection props: `demo` (`opencode` groups by turn, `claude` groups sequences, `preview` shows the README turn), `part` (`a`, `b`, `short`, `edge`: Markdown parts; ignored in `preview`), `expand` (expands sections, thoughts, and tools), `open` (`model` or `agent`: opens the selector on load). Then `herdr-app shot file.png` saves the window frame. The chat only reads the transcript while the Herdr window is active; when another app is in the foreground it intentionally stays paused.
 
-## Como abrir no Herdr
+## How to open in Herdr
 
-### Dividir painel ao lado do terminal (Split)
+### Split pane next to a terminal
 ```sh
 herdr-app do pane.split --direction right --mod agent-chat
 ```
-Ou especificando o terminal de destino:
+Or targeting a specific terminal:
 ```sh
 herdr-app do pane.split --direction right --mod agent-chat --props '{"terminal":"t2n"}'
 ```
 
-### Abrir em uma nova aba
+### Open in a new tab
 ```sh
 herdr-app do tab.new --name "Agent Chat" --mod agent-chat
 ```
 
 ## Skill
 
-A skill `herdr-publish` está em `.agents/skills/herdr-publish/SKILL.md`. Ela cobre validação, sync, `RECIPE.md`/`preview.png` e publicação em `herdr.dev/mods` com o tópico `herdr-mod`.
+The `herdr-publish` skill is in `.agents/skills/herdr-publish/SKILL.md`. It covers validation, sync, `RECIPE.md`/`preview.png`, and publishing to `herdr.dev/mods` with the `herdr-mod` topic.
