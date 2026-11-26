@@ -38,6 +38,7 @@ import {
 import {
   parseConversation,
   terminalQuotaFailure,
+  screenAwaitsChoice,
   spliceHistory,
   toolGroupSummaryKind,
   summarizeToolGroup,
@@ -2170,6 +2171,26 @@ export default class AgentChat extends View {
             .items_center()
             .justify_end()
             .child(btn("act-cancel", "Cancel (Esc)", (cx) => this.sendKey("esc", cx)))
+        );
+    }
+
+    // Blocked at an idle composer: the agent asked a question in prose and
+    // wants a typed reply, so approval keys would do nothing useful.
+    if (!screenAwaitsChoice(this.rawText)) {
+      return h_flex()
+        .id("pending-reply-hint")
+        .w_full()
+        .max_w(COLUMN)
+        .mb(8)
+        .px(4)
+        .gap(6)
+        .items_center()
+        .child(svg("mods/agent-chat/icons/shield-alert.svg").size(13).flex_none().text_color(t.blocked))
+        .child(
+          div()
+            .text_size(12)
+            .text_color(t.dim)
+            .child("The agent is waiting for your reply")
         );
     }
 

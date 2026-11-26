@@ -27,6 +27,32 @@ export function stripAnsi(str) {
  * permission dialog or a new prompt) makes it historical, even if the error is
  * still visible.
  */
+/**
+ * Whether the bottom of the screen shows a prompt that takes a key press
+ * (a permission dialog, a numbered menu, a y/n question). Herdr also reports
+ * `blocked` when an agent simply ends its turn with a question at an idle
+ * composer; approval keys would be meaningless there.
+ * @param {string} text terminal screen text
+ * @returns {boolean}
+ */
+export function screenAwaitsChoice(text) {
+  const tail = stripAnsi(text)
+    .split("\n")
+    .map((line) => line.replace(/^[\s│┃|]+|[\s│┃|]+$/g, ""))
+    .filter(Boolean)
+    .slice(-25);
+  return tail.some(
+    (line) =>
+      // Highlighted numbered option: "❯ 1. Yes", "› 2) No".
+      /^[❯›>▶]\s*\d+[.)]\s+\S/.test(line) ||
+      // Plain numbered answer options of a permission dialog.
+      /^\d+[.)]\s+(?:Yes|No|Allow|Approve|Deny|Reject|Always)\b/i.test(line) ||
+      // Short standalone choice lines: "Allow once", "> Deny".
+      /^(?:[❯›>▶]\s*)?(?:Allow|Deny|Approve|Reject)\b.{0,40}$/i.test(line) ||
+      /[([](?:y\/n|Y\/n|y\/N|yes\/no)[)\]]/.test(line)
+  );
+}
+
 export function terminalQuotaFailure(text) {
   const lines = stripAnsi(text).trimEnd().split("\n");
   return antigravityQuotaFailure(lines) || codexQuotaFailure(lines);

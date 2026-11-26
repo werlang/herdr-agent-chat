@@ -1,5 +1,5 @@
 import assert from "node:assert";
-import { parseConversation, stripAnsi, terminalQuotaFailure } from "../mods/agent-chat/parser.js";
+import { parseConversation, stripAnsi, terminalQuotaFailure, screenAwaitsChoice } from "../mods/agent-chat/parser.js";
 
 // Test 1: stripAnsi
 const ansiText = "\x1b[32mHello\x1b[0m \x1b[1mWorld\x1b[0m\r\n";
@@ -209,3 +209,28 @@ assert.strictEqual(
   terminalQuotaFailure(codexQuotaScreen.replace("› Ask Codex to do anything", "› new request")),
   null
 );
+
+// screenAwaitsChoice: key-press prompts vs. a prose question at an idle composer
+{
+  const proseQuestion = [
+    "Quer que eu implemente esse dashboard (24h / 7d / 30d) e salve seu plans.json?",
+    "1 artifact · /artifact to review",
+    "──────────────",
+    ">",
+    "──────────────",
+    "? for shortcuts            auto · Gemini 4 Neon · medium",
+  ].join("\n");
+  assert.equal(screenAwaitsChoice(proseQuestion), false);
+
+  const claudeDialog = [
+    "│ Bash command",
+    "│   rm -rf build",
+    "│ Do you want to proceed?",
+    "│ ❯ 1. Yes",
+    "│   2. Yes, and don't ask again",
+    "│   3. No, and tell Claude what to do differently (esc)",
+  ].join("\n");
+  assert.equal(screenAwaitsChoice(claudeDialog), true);
+  assert.equal(screenAwaitsChoice("Overwrite file? (y/n)"), true);
+  assert.equal(screenAwaitsChoice("› 1. Yes, proceed\n  2. No"), true);
+}
