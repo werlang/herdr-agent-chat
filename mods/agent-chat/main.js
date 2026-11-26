@@ -117,10 +117,31 @@ function effortLabel(id) {
 /** Display label for a discovered Claude model id. */
 function claudeModelLabel(id, discovered = []) {
   if (!id) return null;
-  const match = (discovered || []).find(
-    (m) => m.id === id || m.resolvedModel === id || id.startsWith(m.resolvedModel || m.id)
+  // A concrete id ("claude-opus-5-5") names its own version; the catalogue's
+  // "default" alias resolves to the same id, so matching it would show
+  // "Default (recommended)" for a session explicitly set to Opus.
+  const family = id.match(/^claude-([a-z]+)-(\d+)-(\d+)/i);
+  if (family) return `${family[1][0].toUpperCase()}${family[1].slice(1)} ${family[2]}.${family[3]}`;
+  return findClaudeModel(id, discovered)?.label || id;
+}
+
+/**
+ * Finds the catalogue entry for a Claude model id or alias. An exact alias
+ * wins, then a concrete entry resolving to that model, and only then the
+ * `default` alias, which resolves to the same model as one of the others.
+ * @param {string|null} id
+ * @param {Array<{id: string, resolvedModel?: string}>} discovered
+ */
+function findClaudeModel(id, discovered = []) {
+  if (!id) return null;
+  const list = discovered || [];
+  const resolves = (m) => m.resolvedModel === id || id.startsWith(m.resolvedModel || m.id);
+  return (
+    list.find((m) => m.id === id) ||
+    list.find((m) => m.id !== "default" && resolves(m)) ||
+    list.find(resolves) ||
+    null
   );
-  return match?.label || id;
 }
 
 /** "deepseek-v4.1-flash" → "Deepseek V4.1 Flash", for before the catalogue loads. */
@@ -3734,11 +3755,12 @@ export default class AgentChat extends View {
         ? this.transcript.model
         : null);
     const currentClaudeModel = isClaude
-      ? this.claudeModels.find(
-          (m) =>
-            (currentClaudeRawId && (m.id === currentClaudeRawId || m.resolvedModel === currentClaudeRawId || currentClaudeRawId.startsWith(m.resolvedModel || m.id))) ||
-            (currentModelName && (m.label === currentModelName || currentModelName.includes(m.label)))
-        ) || this.claudeModels[0] || null
+      ? findClaudeModel(currentClaudeRawId, this.claudeModels) ||
+        this.claudeModels.find(
+          (m) => currentModelName && (m.label === currentModelName || currentModelName.includes(m.label))
+        ) ||
+        this.claudeModels[0] ||
+        null
       : null;
 
     const codexState = isCodex ? this.currentCodexModelInfo() : null;
