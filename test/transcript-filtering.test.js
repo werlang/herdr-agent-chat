@@ -570,3 +570,23 @@ test("ingestAntigravityEntry parses Model Selection changes from USER_SETTINGS_C
   assert.equal(state.items.length, 1);
   assert.equal(state.items[0].text, "hi");
 });
+
+test("parseScreenModel reads the OpenCode 2.4 footer without a Build/Plan prefix", () => {
+  const screen = [
+    "            /update to install",
+    "            v2.4.2",
+    "",
+    " ┃",
+    " ┃ Ask anything… \"What is the tech stack",
+    " ┃",
+    " ┃ DeepSeek V4.1 Flash 1017 · max",
+    " ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+    " ~/workspaces/node-aec:dev",
+    "",
+  ].join("\n");
+  assert.deepEqual(parseScreenModel(screen, "opencode"), { model: "DeepSeek V4.1 Flash 1017", effort: "max" });
+  const noVariant = screen.replace(" · max", "");
+  assert.deepEqual(parseScreenModel(noVariant, "opencode"), { model: "DeepSeek V4.1 Flash 1017", effort: null });
+  const emptyBox = " ┃\n ┃ Ask anything…\n ┃\n ╹▀▀▀▀▀▀▀▀▀▀\n";
+  assert.equal(parseScreenModel(emptyBox, "opencode"), null);
+});

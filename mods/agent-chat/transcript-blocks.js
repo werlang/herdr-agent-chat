@@ -1109,6 +1109,21 @@ export function parseScreenModel(text, app = "") {
     }
   }
 
+  if (normalizedApp === "opencode") {
+    // OpenCode 2.4+ dropped the "Build ·" agent prefix: the footer is just
+    // "<model> <provider>[ · <variant>]", the last line inside the prompt box
+    // before its "╹▀▀▀" bottom border.
+    const lines = clean.split("\n");
+    const border = lines.findLastIndex((line) => /^\s*╹▀{5,}/.test(line));
+    for (let i = border - 1; border > 0 && i >= 0; i--) {
+      const line = lines[i].replace(/[┃│]/g, " ").trim();
+      if (!line) continue;
+      if (/^Ask anything\b/i.test(line)) break;
+      const footer = line.match(/^(.+?)(?:\s+·\s+(\S+))?$/);
+      return footer ? { model: footer[1].trim(), effort: footer[2]?.toLowerCase() || null } : null;
+    }
+  }
+
   return !normalizedApp ? parseClaude() : null;
 }
 
