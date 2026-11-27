@@ -100,11 +100,19 @@ export class OpenCodeTranscript {
     }
     await fs.mkdir(this.scratch, { recursive: true });
     const safeTerm = String(this.terminal || "").replace(/[^A-Za-z0-9_-]/g, "_");
-    const out = `${this.scratch}/opencode-${safeTerm}.json`;
-    const res = await exec("sqlite3", ["-readonly", "-json", this.db, `.output ${out}`, query]);
-    if (res.code !== 0) return null;
-    const text = await fs.readFile(out, "utf8");
-    return text.trim() ? JSON.parse(text) : [];
+    // One directory per query: two chat panes on the same terminal can poll
+    // concurrently without reading each other's half-written output.
+    const dir = await fs.mkdtemp(`${this.scratch}/opencode-${safeTerm}-`);
+    const out = `${dir}/rows.json`;
+    try {
+      const res = await exec("sqlite3", ["-readonly", "-json", this.db, `.output ${out}`, query]);
+      if (res.code !== 0) return null;
+      const text = await fs.readFile(out, "utf8");
+      return text.trim() ? JSON.parse(text) : [];
+    } finally {
+      // Query output can contain full conversations; do not retain it.
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   }
 
   /**
