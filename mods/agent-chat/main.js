@@ -939,6 +939,18 @@ export default class AgentChat extends View {
       }
     }
 
+    // Antigravity writes a model/effort switch to its transcript only with the
+    // next prompt, and Codex may not have flushed it yet (a fresh session has
+    // no rollout entries at all), so the switch is read off the screen footer
+    // and shown as a live notice until the transcript carries it.
+    let screenSeen = null;
+    if (isAntigravity) screenSeen = parseScreenModel(this.rawText, "antigravity");
+    else if (isCodex) {
+      const codexScreen = this.currentCodexScreen();
+      screenSeen = codexScreenModel(codexScreen, this.codexModels) || parseScreenModel(codexScreen, "codex");
+    }
+    const switchNoticeChanged = (isAntigravity || isCodex) && this.trackScreenSwitch(result.blocks, screenSeen);
+
     const reportedStatus = findAgent(this.terminal)?.status || "idle";
     const screenText = isCodex
       ? this.codexModelScreen?.terminal === this.terminal ? this.codexModelScreen.text : ""
@@ -952,9 +964,18 @@ export default class AgentChat extends View {
     const quotaText = quota?.text ?? null;
     const quotaChanged = quotaText !== this._transcriptQuota;
     this._transcriptQuota = quotaText;
-    if (!result.changed && !first && !quotaChanged && nextStatus === this.status) return true;
+    if (!result.changed && !first && !quotaChanged && !switchNoticeChanged && nextStatus === this.status) return true;
     this.status = nextStatus;
     let blocks = result.blocks;
+    if (this._screenSwitch?.terminal === this.terminal && this._screenSwitch.notices.length) {
+      // Skip a live notice once the transcript shows the same switch itself.
+      const lastUser = blocks.findLastIndex((block) => block.type === "user");
+      const logged = new Set(
+        blocks.slice(lastUser + 1).filter((block) => block.type === "notice").map((block) => block.text.toLowerCase())
+      );
+      const live = this._screenSwitch.notices.filter((notice) => !logged.has(notice.text.toLowerCase()));
+      if (live.length) blocks = [...blocks, ...live];
+    }
     if (quota) {
       const lastUser = blocks.findLastIndex((block) => block.type === "user");
       const hasQuotaNotice = blocks.slice(lastUser + 1).some(
@@ -3394,6 +3415,44 @@ export default class AgentChat extends View {
               : "Send a message to start the conversation."
           )
       );
+  }
+
+  /**
+   * Watches the screen footer (Antigravity, Codex) for a model or effort
+   * switch and keeps "Model set to …" / "Effort set to …" notices for it. The
+   * notices live only until the next user turn reaches the transcript, which
+   * by then carries the switch itself.
+   * @param {Array<object>} blocks transcript blocks of this poll
+   * @param {{model?: string|null, effort?: string|null}|null} seen footer reading
+   * @returns {boolean} true when the live notices changed
+   */
+  trackScreenSwitch(blocks, seen) {
+    const users = blocks.filter((block) => block.type === "user").length;
+    let state = this._screenSwitch;
+    if (!state || state.terminal !== this.terminal) {
+      state = this._screenSwitch = { terminal: this.terminal, model: null, effort: null, users, notices: [] };
+    }
+    let changed = false;
+    if (users !== state.users) {
+      state.users = users;
+      if (state.notices.length) {
+        state.notices = [];
+        changed = true;
+      }
+    }
+    // An unreadable footer (picker open, redraw) is not a switch.
+    if (!seen?.model) return changed;
+    const effort = seen.effort ? String(seen.effort).toLowerCase() : null;
+    if (state.model && seen.model.toLowerCase() !== state.model.toLowerCase()) {
+      state.notices.push({ type: "notice", tone: "info", text: `Model set to ${seen.model}` });
+      changed = true;
+    } else if (state.model && effort && effort !== state.effort) {
+      state.notices.push({ type: "notice", tone: "info", text: `Effort set to ${effort}` });
+      changed = true;
+    }
+    state.model = seen.model;
+    state.effort = effort;
+    return changed;
   }
 
   /** `{ model, effort }` display names; either may be null when it cannot be told. */
