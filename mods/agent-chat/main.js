@@ -3844,7 +3844,16 @@ export default class AgentChat extends View {
           this.notice = null;
           cx.notify();
         });
-        await this.update(cx);
+        // The server accepted it: show it now. The next poll reads the same
+        // values back from `session_v2` along with the switch notice.
+        const tr = this.transcript;
+        if (tr instanceof OpenCodeTranscript && tr.sessionId === session) {
+          tr.model = model.modelID;
+          tr.provider = model.providerID || null;
+          tr.effort = variant || null;
+        }
+        cx.notify();
+        cx.spawn(async (cx) => this.update(cx));
       } catch (err) {
         this.notice = `Could not switch model: ${err instanceof Error ? err.message : String(err)}`;
       }
