@@ -28,6 +28,34 @@ export function stripAnsi(str) {
  * still visible.
  */
 /**
+ * The last `count` lines of a screen, without ANSI codes. Callers only look at
+ * the bottom of the screen, and a long scrollback must not cost every render.
+ * @param {string} text
+ * @param {number} count
+ * @returns {string[]}
+ */
+function tailLines(text, count) {
+  return stripAnsi(text).split("\n").slice(-count);
+}
+
+/**
+ * Trims whitespace and the given border characters from both ends in linear
+ * time. A regex such as `/[\s│┃]+$/` retries from every position of a long
+ * run of spaces (quadratic), which on a wide screen exceeded the render budget.
+ * @param {string} line
+ * @param {string} borders
+ * @returns {string}
+ */
+function trimBorders(line, borders) {
+  const strip = (ch) => ch.trim() === "" || borders.includes(ch);
+  let start = 0;
+  let end = line.length;
+  while (start < end && strip(line[start])) start++;
+  while (end > start && strip(line[end - 1])) end--;
+  return line.slice(start, end);
+}
+
+/**
  * Whether the bottom of the screen shows a prompt that takes a key press
  * (a permission dialog, a numbered menu, a y/n question). Herdr also reports
  * `blocked` when an agent simply ends its turn with a question at an idle
@@ -36,9 +64,8 @@ export function stripAnsi(str) {
  * @returns {boolean}
  */
 export function screenAwaitsChoice(text) {
-  const tail = stripAnsi(text)
-    .split("\n")
-    .map((line) => line.replace(/^[\s│┃|]+|[\s│┃|]+$/g, ""))
+  const tail = tailLines(text, 120)
+    .map((line) => trimBorders(line, "│┃|"))
     .filter(Boolean)
     .slice(-25);
   return tail.some(
@@ -65,9 +92,11 @@ export function screenAwaitsChoice(text) {
  * @returns {{ title: string, body: string[], options: { label: string }[], selected: number } | null}
  */
 export function parseScreenChoice(text) {
-  const lines = stripAnsi(text)
-    .split("\n")
-    .map((line) => line.replace(/^\s*[│┃]\s?/, "").replace(/\s*[│┃]\s*$/, "").replace(/\s+$/, ""));
+  // The menu sits in the last 40 lines; its heading at most 14 above that.
+  const lines = tailLines(text, 80).map((line) => {
+    const start = line.replace(/^\s*[│┃]\s?/, "").trimEnd();
+    return /[│┃]$/.test(start) ? start.slice(0, -1).trimEnd() : start;
+  });
   const indentOf = (line) => line.search(/\S/);
   const isRule = (line) => /^\s*[─━╌┄\-╭╰╮╯]{8,}\s*$/.test(line);
   const marker = /^(\s*)[❯›▶>]\s+(\S.*)$/;

@@ -1026,7 +1026,17 @@ export function screenModel(rawText, app = "") {
  */
 export function parseScreenModel(text, app = "") {
   if (!text) return null;
-  const clean = String(text).replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "");
+  // Footers and banners are short. Runs of spaces collapse to two (the
+  // Antigravity pattern keys on `\s{2,}`) and overlong lines are dropped: a
+  // narrow full-screen TUI soft-wraps every row, so the whole screen arrives
+  // as one line of thousands of spaces, and the unanchored patterns below
+  // backtrack over it long enough to abort the render.
+  const clean = String(text)
+    .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "")
+    .split("\n")
+    .map((line) => line.replace(/[ \t]{3,}/g, "  "))
+    .filter((line) => line.length <= 400)
+    .join("\n");
   const normalizedApp = String(app || "").toLowerCase();
 
   const parseClaude = () => {

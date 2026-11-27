@@ -622,3 +622,20 @@ test("ingestCodexEntry emits notices only when thread settings change", async ()
   assert.deepEqual(state.items.map((i) => i.text), ["Effort set to high", "Model set to gpt-6.1-terra"]);
   assert.equal(state.model, "gpt-6.1-terra");
 });
+
+test("screen parsers stay fast on a soft-wrapped single-line screen", async () => {
+  const { parseScreenChoice, screenAwaitsChoice } = await import("../mods/agent-chat/parser.js");
+  // A narrow full-screen TUI wraps every row, so the whole screen is one line.
+  const line = `${" ".repeat(3800)}Build auto · GLM-5.3 OpenCode Go · max${" ".repeat(300)}⊙ 2 MCP`;
+  const started = performance.now();
+  parseScreenModel(line, "opencode");
+  parseScreenModel(line, "");
+  parseScreenChoice(line);
+  screenAwaitsChoice(line);
+  assert.ok(performance.now() - started < 50);
+  // Normal footers still parse after collapsing space runs.
+  assert.deepEqual(
+    parseScreenModel(" ┃  Build auto · GLM-5.3 OpenCode Go · high\n ╹▀▀▀▀", "opencode"),
+    { model: "GLM-5.3 OpenCode Go", effort: "high" }
+  );
+});
