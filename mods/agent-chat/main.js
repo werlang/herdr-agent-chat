@@ -669,6 +669,7 @@ export default class AgentChat extends View {
   switchTo(address, cx) {
     if (!address) return;
     this.terminal = address;
+    this._feedSource = null;
     this.status = "idle";
     const term = terminals().find((t) => t.address === address);
     const createdMs = term?.created_ms || 0;
@@ -820,6 +821,7 @@ export default class AgentChat extends View {
         this._screenAt = 0;
         this._transcriptQuota = null;
         this.transcript = null;
+        this._feedSource = null;
       }
       if (agentApp(findAgent(this.terminal))) this.refreshModels(cx);
 
@@ -866,6 +868,7 @@ export default class AgentChat extends View {
       blocks = assignKeys(blocks.map((b) => ({ ...b })), this.blocks);
 
       if (gen !== this._generation) return;
+      this._feedSource = `screen:${this.terminal}`;
       this.applyBlocks(blocks, cx);
       this.updateGitBranch();
     } catch (_err) {
@@ -896,18 +899,25 @@ export default class AgentChat extends View {
     }[agentApp(live)];
     if (!Reader) return false;
     if (!(this.transcript instanceof Reader) || this.transcript.terminal !== this.terminal) {
+      const previous = this.transcript;
       const cached = this.transcriptCache.get(this.terminal);
       this.transcript =
         cached instanceof Reader && cached.terminal === this.terminal
           ? cached
           : new Reader(this.terminal);
+      if (previous !== this.transcript) this._feedSource = null;
       this.transcriptCache.delete(this.terminal);
       this.transcriptCache.set(this.terminal, this.transcript);
       this.pruneTerminalCaches();
     }
     let result = await this.transcript.refresh((live?.status || "idle") === "working");
     if (gen !== undefined && gen !== this._generation) return true;
-    if (!result) return false;
+    if (!result) {
+      // One failed read (the store busy while the agent writes a switch) is
+      // not "no transcript": once this reader has drawn the feed, keep it
+      // rather than flash the parsed screen into the conversation.
+      return this._feedSource === `transcript:${this.terminal}`;
+    }
 
     // If the initial tail does not yet fill approximately one screen of
     // meaningful conversation, pull earlier batches automatically.
@@ -986,7 +996,12 @@ export default class AgentChat extends View {
     const quotaText = quota?.text ?? null;
     const quotaChanged = quotaText !== this._transcriptQuota;
     this._transcriptQuota = quotaText;
-    if (!result.changed && !first && !quotaChanged && !switchNoticeChanged && nextStatus === this.status) return true;
+    // After a screen fallback drew the feed, the unchanged transcript must
+    // still replace it.
+    const ownsFeed = this._feedSource === `transcript:${this.terminal}`;
+    if (!result.changed && !first && ownsFeed && !quotaChanged && !switchNoticeChanged && nextStatus === this.status) {
+      return true;
+    }
     this.status = nextStatus;
     let blocks = result.blocks;
     if (this._screenSwitch?.terminal === this.terminal && this._screenSwitch.notices.length) {
@@ -1008,6 +1023,7 @@ export default class AgentChat extends View {
     const keyed = assignKeys(blocks, this.blocks);
     this.historyCache.delete(this.terminal);
     this.historyCache.set(this.terminal, keyed);
+    this._feedSource = `transcript:${this.terminal}`;
     this.applyBlocks(keyed, cx);
     return true;
   }
