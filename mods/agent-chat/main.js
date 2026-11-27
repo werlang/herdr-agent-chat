@@ -401,6 +401,19 @@ function cloneBlocks(blocks) {
 }
 
 /**
+ * Key names that type `text` into a TUI search field with `hc keys`: lowercase
+ * letters, digits, `.` `-` `/` and `space`. Other characters are dropped; the
+ * OpenCode pickers match fuzzily and ignore case.
+ * @param {string} text
+ * @returns {string[]}
+ */
+function pickerKeys(text) {
+  return [...String(text).toLowerCase()]
+    .map((ch) => (ch === " " ? "space" : /[a-z0-9.\-/]/.test(ch) ? ch : null))
+    .filter(Boolean);
+}
+
+/**
  * Runs an hc command and throws if it exits non-zero.
  * @param {string[]} args
  * @returns {Promise<any>}
@@ -943,13 +956,22 @@ export default class AgentChat extends View {
     // next prompt, and Codex may not have flushed it yet (a fresh session has
     // no rollout entries at all), so the switch is read off the screen footer
     // and shown as a live notice until the transcript carries it.
+    // OpenCode logs every switch as a `model-switched` row, but only once a
+    // session exists; before the first prompt the footer is all there is.
+    const isFreshOpenCode = this.transcript instanceof OpenCodeTranscript && !this.transcript.sessionId;
     let screenSeen = null;
     if (isAntigravity) screenSeen = parseScreenModel(this.rawText, "antigravity");
     else if (isCodex) {
       const codexScreen = this.currentCodexScreen();
       screenSeen = codexScreenModel(codexScreen, this.codexModels) || parseScreenModel(codexScreen, "codex");
+    } else if (isFreshOpenCode) {
+      const seen = this.openCodeFooter();
+      const known = seen?.model ? resolveOpenCodeModel(this.models, this.providers, seen.model) : null;
+      // No "· variant" in the footer means the model default.
+      screenSeen = seen ? { model: known?.name || seen.model, effort: seen.effort || "default" } : null;
     }
-    const switchNoticeChanged = (isAntigravity || isCodex) && this.trackScreenSwitch(result.blocks, screenSeen);
+    const switchNoticeChanged =
+      (isAntigravity || isCodex || isFreshOpenCode) && this.trackScreenSwitch(result.blocks, screenSeen);
 
     const reportedStatus = findAgent(this.terminal)?.status || "idle";
     const screenText = isCodex
@@ -1348,7 +1370,10 @@ export default class AgentChat extends View {
     const vh = this._feedHeight > 0 ? this._feedHeight : 600;
     const colW = Math.min(COLUMN, this._feedWidth > 0 ? this._feedWidth : COLUMN);
     const canFetchTranscript = Boolean(this.transcript?.hasEarlier) && !this.demo;
-    const canFetchCli = !this.transcript?.path && !this.transcript?.sessionId && !this._cliExhausted && !this.demo;
+    // Live switch notices before a session exists are not screen history.
+    const onlyNotices = this.blocks.every((block) => block.type === "notice");
+    const canFetchCli =
+      !this.transcript?.path && !this.transcript?.sessionId && !this._cliExhausted && !this.demo && !onlyNotices;
     const hasLoadEarlier = start > 0 || canFetchTranscript || canFetchCli;
     const est = computeFeedLayout(visible, this.expanded, vh, hasLoadEarlier, colW);
     const totalHeight = this._contentHeight > 0 ? this._contentHeight : est.totalHeight;
@@ -3307,7 +3332,10 @@ export default class AgentChat extends View {
 
     const children = [];
     const canFetchTranscript = Boolean(this.transcript?.hasEarlier) && !this.demo;
-    const canFetchCli = !this.transcript?.path && !this.transcript?.sessionId && !this._cliExhausted && !this.demo;
+    // Live switch notices before a session exists are not screen history.
+    const onlyNotices = this.blocks.every((block) => block.type === "notice");
+    const canFetchCli =
+      !this.transcript?.path && !this.transcript?.sessionId && !this._cliExhausted && !this.demo && !onlyNotices;
     if (start > 0) children.push(this.renderLoadEarlier(t, cx, "memory"));
     else if (canFetchTranscript) children.push(this.renderLoadEarlier(t, cx, "transcript"));
     else if (canFetchCli) children.push(this.renderLoadEarlier(t, cx, "cli"));
@@ -3526,7 +3554,7 @@ export default class AgentChat extends View {
         ? this.transcript
         : null;
       const known = this.currentOpenCodeModel();
-      const seen = parseScreenModel(this.rawText, "opencode");
+      const seen = this.openCodeFooter();
       // Before the first session row exists the TUI footer is the only
       // source; it names the model as "<name> <provider>", so resolve it
       // against the catalogue instead of showing the raw label.
@@ -3743,6 +3771,22 @@ export default class AgentChat extends View {
     });
   }
 
+  /**
+   * The model and effort in the OpenCode TUI footer. While a picker or the
+   * command palette covers the screen the footer cannot be read; the last
+   * reading of this terminal stands in so the composer never drops to "Model".
+   * @returns {{model: string|null, effort: string|null}|null}
+   */
+  openCodeFooter() {
+    // Render asks several times per frame; parse each screen text once.
+    const cache = this._openCodeFooter;
+    if (cache?.terminal === this.terminal && cache.text === this.rawText) return cache.seen;
+    const parsed = parseScreenModel(this.rawText, "opencode");
+    const seen = parsed?.model ? parsed : cache?.terminal === this.terminal ? cache.seen : null;
+    this._openCodeFooter = { terminal: this.terminal, text: this.rawText, seen };
+    return seen;
+  }
+
   /** The catalogue entry of the OpenCode session's current model, or null. */
   currentOpenCodeModel() {
     const tr = this.transcript instanceof OpenCodeTranscript && this.transcript.terminal === this.terminal
@@ -3757,7 +3801,7 @@ export default class AgentChat extends View {
     }
     // No session row yet (a fresh TUI): the footer still names the model and
     // the catalogue knows its variants, so effort stays selectable.
-    const seen = parseScreenModel(this.rawText, "opencode");
+    const seen = this.openCodeFooter();
     return resolveOpenCodeModel(this.models, this.providers, tr?.model || seen?.model, tr?.provider || null);
   }
 
@@ -3771,7 +3815,9 @@ export default class AgentChat extends View {
    */
   switchOpenCodeModel(model, cx, variant) {
     if (variant === undefined) {
-      const current = this.transcript instanceof OpenCodeTranscript ? this.transcript.effort : null;
+      // Before the first prompt there is no session row; the footer has it.
+      const current =
+        (this.transcript instanceof OpenCodeTranscript ? this.transcript.effort : null) || this.openCodeFooter()?.effort || null;
       variant = current && (model.variants || []).some((v) => v.id === current) ? current : null;
     }
     this.closeModelMenu();
@@ -3781,7 +3827,7 @@ export default class AgentChat extends View {
         ? this.transcript.sessionId
         : null;
     if (!session) {
-      this.chooseModel("/models", cx);
+      this.switchOpenCodeModelInPicker(model, variant, cx);
       return;
     }
     const on = spaces().find((s) => s.active)?.machine ?? null;
@@ -3801,6 +3847,126 @@ export default class AgentChat extends View {
         await this.update(cx);
       } catch (err) {
         this.notice = `Could not switch model: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      cx.notify();
+    });
+  }
+
+  /**
+   * Switches a fresh OpenCode TUI (no session row yet, so no API session to
+   * address) by driving its native pickers:
+   * - another model: `/models` opens "Select model"; typing "<name> <provider>"
+   *   filters it and Enter picks the first match. A model with variants then
+   *   opens "Select variant", answered the same way.
+   * - same model (effort only), or a model pick that skipped "Select variant"
+   *   (OpenCode remembers each model's last variant): `ctrl+t` ("Variant
+   *   cycle") steps through the variants until the footer shows the target.
+   * Text is only typed once the expected picker is on screen, so nothing lands
+   * in the prompt as a message. The footer is read back to confirm the result.
+   * @param {any} model catalogue entry
+   * @param {string|null} variant effort, or null for the model default
+   * @param {any} cx
+   */
+  switchOpenCodeModelInPicker(model, variant, cx) {
+    if (!this.beginModelSelection(cx)) return;
+    const terminal = this.terminal;
+    const current = this.currentOpenCodeModel();
+    const sameModel = current?.modelID === model.modelID && current?.providerID === model.providerID;
+    const hasVariants = Array.isArray(model.variants) && model.variants.length > 0;
+    // An effort the model does not offer would match nothing in its picker.
+    if (variant && !(model.variants || []).some((v) => v.id === variant)) variant = null;
+    const screen = async () => {
+      const res = await hc(["read", terminal, "--lines", "0", "--json"]);
+      return res.code === 0 && res.stdout ? JSON.parse(res.stdout)?.text || "" : "";
+    };
+    // Polls the screen until `test` holds, for up to ~2.4 s. Timers go
+    // through the spawned task's own `cx`; the caller's is gone by then.
+    const until = async (cx, test, tries = 24) => {
+      for (let i = 0; i < tries; i++) {
+        await new Promise((resolve) => cx.timer.after(100, resolve));
+        const text = await screen();
+        if (test(text)) return text;
+      }
+      return null;
+    };
+    const footerOf = (text) => parseScreenModel(text, "opencode");
+    // The footer already shows the wanted model and effort (OpenCode keeps a
+    // model's last variant and then skips "Select variant").
+    const done = (text) => {
+      if (/Select (?:model|variant)|Commands/.test(text)) return false;
+      const seen = footerOf(text);
+      const picked = seen?.model ? resolveOpenCodeModel(this.models, this.providers, seen.model) : null;
+      return picked?.modelID === model.modelID && (seen.effort || null) === (hasVariants ? variant || null : seen.effort || null);
+    };
+    // Typed as key presses, not `hc send`: a send waits ~5 s to see whether
+    // the text started a turn, which a picker search never does.
+    const type = (text) => hcOrThrow(["keys", terminal, ...pickerKeys(text), "enter"]);
+    cx.spawn(async (cx) => {
+      try {
+        let variantOpen = false;
+        if (!sameModel) {
+          // ctrl+x m is OpenCode's "Switch model"; unlike typing `/models` it
+          // leaves a half-written prompt alone.
+          await hcOrThrow(["keys", terminal, "ctrl+x", "m"]);
+          if (!(await until(cx, (text) => /Select model/.test(text)))) throw new Error("OpenCode model picker did not open");
+          // Each key costs ~45 ms: name the provider only when another one
+          // offers a model of the same name.
+          const name = model.name || model.modelID;
+          const shared = this.models.filter((m) => (m.name || m.modelID) === name).length > 1;
+          const provider = shared ? this.providers?.[model.providerID] || model.providerID || "" : "";
+          await type(`${name} ${provider}`.trim());
+          if (hasVariants) {
+            // "Select variant" opens a moment after the model picker closes,
+            // so a bare footer in between is not an answer yet.
+            const text = await until(cx, (text) => /Select variant/.test(text) || done(text), 4);
+            variantOpen = Boolean(text && /Select variant/.test(text));
+          }
+        }
+        if (hasVariants && !variantOpen && !done(await screen())) {
+          // ctrl+t is OpenCode's "Variant cycle" (default → each variant →
+          // default). One key per step and nothing typed into the TUI, so it
+          // beats the command palette; stop once the footer shows the target.
+          const want = variant || null;
+          let reached = false;
+          for (let step = 0; step <= model.variants.length && !reached; step++) {
+            const before = footerOf(await screen())?.effort || null;
+            if (before === want) {
+              reached = true;
+              break;
+            }
+            await hcOrThrow(["keys", terminal, "ctrl+t"]);
+            await until(cx, (text) => (footerOf(text)?.effort || null) !== before, 6);
+          }
+          if (!reached && (footerOf(await screen())?.effort || null) !== want) {
+            throw new Error(`OpenCode effort ${effortLabel(want) || "Default"} not reached`);
+          }
+        }
+        if (variantOpen) await type(variant || "Default");
+        const footer = await until(
+          cx,
+          // Closed and redrawn: a frame mid-redraw has no footer yet.
+          (text) => !/Select (?:model|variant)/.test(text) && Boolean(footerOf(text)?.model)
+        );
+        if (!footer) {
+          await hc(["keys", terminal, "esc"]);
+          throw new Error("OpenCode picker did not close");
+        }
+        this.rawText = footer;
+        const seen = footerOf(footer);
+        const picked = resolveOpenCodeModel(this.models, this.providers, seen?.model);
+        if (picked && picked.modelID !== model.modelID) throw new Error(`OpenCode picked ${picked.name || picked.modelID}`);
+        const name = model.name || model.modelID;
+        this.notice = variant ? `${name} · ${effortLabel(variant)} selected` : `${name} selected`;
+        cx.timer.after(2500, (cx) => {
+          this.notice = null;
+          cx.notify();
+        });
+        cx.notify();
+        // The badge reads the footer just stored; the full refresh (transcript,
+        // switch notice) takes seconds and runs on its own.
+        cx.spawn(async (cx) => this.update(cx));
+      } catch (err) {
+        this.flashNotice(`Could not switch model: ${err instanceof Error ? err.message : String(err)}`, cx);
       }
       cx.notify();
     });
