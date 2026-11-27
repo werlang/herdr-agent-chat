@@ -591,6 +591,23 @@ test("parseScreenModel reads the OpenCode 2.4 footer without a Build/Plan prefix
   assert.equal(parseScreenModel(emptyBox, "opencode"), null);
 });
 
+test("Antigravity's split orchestrator footer identifies the selected preset", () => {
+  const footer = "esc to cancel                     auto · Orchestrator · Gemini 4 Neon · medium";
+  assert.deepEqual(parseScreenModel(footer, "antigravity"), {
+    model: "Orchestrator (Neon)", effort: null,
+  });
+  const customPlanner = footer.replace("Gemini 4 Neon", "Gemini 4 Hydrogen");
+  assert.deepEqual(
+    parseScreenModel(`  ⎿  Model already set to Orchestrator (Neon)\n${customPlanner}`, "agy"),
+    { model: "Orchestrator (Neon)", effort: null }
+  );
+  assert.deepEqual(parseScreenModel(customPlanner, "agy"), { model: "Orchestrator", effort: null });
+  assert.deepEqual(
+    parseScreenModel(`  ⎿  Model already set to Orchestrator (Neon)\n${footer.replace("Orchestrator · Gemini 4 Neon", "Gemini 4 Hydrogen")}`, "agy"),
+    { model: "Gemini 4 Hydrogen", effort: "medium" }
+  );
+});
+
 test("ingestAntigravityEntry emits notices only for real model/effort switches", () => {
   const state = { items: [], tools: new Map(), lastTool: null, model: null, effort: null };
   const change = (from, to) => ingestAntigravityEntry(state, {

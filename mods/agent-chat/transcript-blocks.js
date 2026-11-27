@@ -1019,6 +1019,23 @@ export function screenModel(rawText, app = "") {
 }
 
 /**
+ * Resolves a split Antigravity orchestrator footer to the selected preset.
+ * Native model confirmations also cover sessions using a custom planner.
+ * @param {string} screen
+ * @param {string} planner
+ * @returns {string}
+ */
+function antigravityOrchestratorLabel(screen, planner) {
+  const confirmations = screen.matchAll(/^\s*[⎿└]\s*Model (?:already )?set to\s+(.+)$/gim);
+  const lastSelection = Array.from(confirmations).at(-1)?.[1].trim();
+  const selectedPreset = lastSelection?.match(/^Orchestrator \([^)]+\)$/i);
+  if (selectedPreset) return selectedPreset[0];
+
+  const preset = ["Neon", "Carbon", "Argon"].find((name) => planner.toLowerCase().endsWith(` ${name.toLowerCase()}`));
+  return preset ? `Orchestrator (${preset})` : "Orchestrator";
+}
+
+/**
  * Parses `{ model, effort }` from a terminal screen capture across supported CLIs.
  * @param {string} text
  * @param {string} [app]
@@ -1106,6 +1123,13 @@ export function parseScreenModel(text, app = "") {
     }
 
     if (isAgyApp) {
+      // The suffix names the planner and its effort. The picker selects the orchestrator preset.
+      const orchestrator = line.match(
+        /(?:^|\s{2,})(?:auto|default|accept-edits|plan)\s+·\s+Orchestrator\s+·\s+([^·]+?)(?:\s+·\s+(?:minimal|low|medium|high|xhigh|max|ultra))?$/i
+      );
+      if (orchestrator) {
+        return { model: antigravityOrchestratorLabel(clean, orchestrator[1].trim()), effort: null };
+      }
       const agyMode = line.match(
         /(?:^|\s{2,})(?:auto|default|accept-edits|plan)\s+·\s+([^·]+?)(?:\s+·\s+(minimal|low|medium|high|xhigh|max|ultra))?$/i
       );
