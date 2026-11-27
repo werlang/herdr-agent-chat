@@ -39,6 +39,7 @@ import {
   parseConversation,
   terminalQuotaFailure,
   screenAwaitsChoice,
+  parseScreenChoice,
   spliceHistory,
   toolGroupSummaryKind,
   summarizeToolGroup,
@@ -831,7 +832,10 @@ export default class AgentChat extends View {
       this.rawText = data.text || "";
       this.rawHistoryCache.set(this.terminal, this.rawText);
 
-      const parsed = parseConversation(data.text);
+      // A startup menu (Codex folder trust) is not conversation: with no history
+      // yet, keep the feed empty and let the choice card offer the options.
+      const startupMenu = !this.historyCache.get(this.terminal)?.length && newStatus !== "working" && parseScreenChoice(data.text);
+      const parsed = startupMenu ? [] : parseConversation(data.text);
       let blocks;
       if (data.complete === true) {
         blocks = parsed;
@@ -2073,10 +2077,111 @@ export default class AgentChat extends View {
   }
 
   /**
+   * A blocked agent's selection menu: the dialog text, one row per option and
+   * Cancel. Clicking a row moves the terminal's highlight to it and confirms.
+   * @param {any} t theme
+   * @param {{ title: string, body: string[], options: { label: string, description?: string }[], selected: number }} choice
+   * @param {Function} btn button factory from renderPendingApprovalActions
+   */
+  renderChoiceCard(t, choice, btn) {
+    const { title, body, options, selected } = choice;
+    return v_flex()
+      .id("pending-question-card")
+      .w_full()
+      .max_w(COLUMN)
+      .mb(10)
+      .p(12)
+      .gap(8)
+      .rounded(12)
+      .bg(withAlpha(t.blocked, "14"))
+      .border_1()
+      .border_color(t.blocked)
+      .child(
+        h_flex()
+          .items_center()
+          .gap(8)
+          .child(svg("mods/agent-chat/icons/shield-alert.svg").size(16).flex_none().text_color(t.blocked))
+          .child(
+            div()
+              .flex_1()
+              .min_w(0)
+              .text_size(13)
+              .font_semibold()
+              .text_color(t.foreground)
+              .child(title || "The agent needs a choice")
+          )
+      )
+      .when(body.length > 0, (el) =>
+        el.child(
+          v_flex()
+            .w_full()
+            .gap(4)
+            .children(body.map((line) => div().text_size(11.5).text_color(t.dim).child(line)))
+        )
+      )
+      .child(
+        v_flex()
+          .w_full()
+          .gap(4)
+          .children(
+            options.map((opt, idx) =>
+              v_flex()
+                .id(`pending-q-opt-${idx}`)
+                .w_full()
+                .px(10)
+                .py(7)
+                .gap(2)
+                .rounded(8)
+                .bg(t.raised)
+                .border_1()
+                .border_color(idx === selected ? t.blocked : t.border)
+                .cursor_pointer()
+                .hover((s) => s.bg(t.hover))
+                .on_click((_e, cx) => {
+                  const step = idx - selected;
+                  const keys = [...Array(Math.abs(step)).fill(step > 0 ? "down" : "up"), "enter"];
+                  this.sendKeys(keys, cx);
+                })
+                .child(
+                  div()
+                    .text_size(12.5)
+                    .font_medium()
+                    .text_color(t.foreground)
+                    .child(`${idx + 1}. ${opt.label}`)
+                )
+                .when(Boolean(opt.description), (el) =>
+                  el.child(div().text_size(11.5).text_color(t.dim).child(opt.description))
+                )
+            )
+          )
+      )
+      .child(
+        h_flex()
+          .items_center()
+          .justify_end()
+          .child(btn("act-cancel", "Cancel (Esc)", (cx) => this.sendKey("esc", cx)))
+      );
+  }
+
+  /**
+   * The selection menu on the agent's screen, or null. Blocked agents always
+   * get it; before any conversation it is shown regardless of status, since
+   * Codex reports no status at its folder-trust prompt.
+   * @returns {ReturnType<typeof parseScreenChoice>}
+   */
+  screenChoice() {
+    if (this.status === "working") return null;
+    if (this.status !== "blocked" && this.blocks.length > 0) return null;
+    const codexScreen = this.codexModelScreen?.terminal === this.terminal ? this.codexModelScreen.text : "";
+    return parseScreenChoice(this.rawText) || (codexScreen ? parseScreenChoice(codexScreen) : null);
+  }
+
+  /**
    * Renders quick approval actions or interactive decision options when the agent is blocked.
    */
   renderPendingApprovalActions(t, cx) {
-    if (this.status !== "blocked") return null;
+    const screenChoice = this.screenChoice();
+    if (this.status !== "blocked" && !screenChoice) return null;
 
     const btn = (id, label, onClick, primary = false) =>
       div()
@@ -2100,79 +2205,12 @@ export default class AgentChat extends View {
 
     const pendingQ = this.pendingQuestion();
     if (pendingQ) {
-      return v_flex()
-        .id("pending-question-card")
-        .w_full()
-        .max_w(COLUMN)
-        .mb(10)
-        .p(12)
-        .gap(8)
-        .rounded(12)
-        .bg(withAlpha(t.blocked, "14"))
-        .border_1()
-        .border_color(t.blocked)
-        .child(
-          h_flex()
-            .items_center()
-            .gap(8)
-            .child(svg("mods/agent-chat/icons/shield-alert.svg").size(16).flex_none().text_color(t.blocked))
-            .child(
-              div()
-                .flex_1()
-                .min_w(0)
-                .text_size(13)
-                .font_semibold()
-                .text_color(t.foreground)
-                .child(pendingQ.question)
-            )
-        )
-        .child(
-          v_flex()
-            .w_full()
-            .gap(4)
-            .children(
-              pendingQ.options.map((opt, idx) =>
-                v_flex()
-                  .id(`pending-q-opt-${idx}`)
-                  .w_full()
-                  .px(10)
-                  .py(7)
-                  .gap(2)
-                  .rounded(8)
-                  .bg(t.raised)
-                  .border_1()
-                  .border_color(idx === 0 ? t.blocked : t.border)
-                  .cursor_pointer()
-                  .hover((s) => s.bg(t.hover))
-                  .on_click((_e, cx) => {
-                    const keys = [...Array(idx).fill("down"), "enter"];
-                    this.sendKeys(keys, cx);
-                  })
-                  .child(
-                    div()
-                      .text_size(12.5)
-                      .font_medium()
-                      .text_color(t.foreground)
-                      .child(`${idx + 1}. ${opt.label}`)
-                  )
-                  .when(Boolean(opt.description), (el) =>
-                    el.child(
-                      div()
-                        .text_size(11.5)
-                        .text_color(t.dim)
-                        .child(opt.description)
-                    )
-                  )
-              )
-            )
-        )
-        .child(
-          h_flex()
-            .items_center()
-            .justify_end()
-            .child(btn("act-cancel", "Cancel (Esc)", (cx) => this.sendKey("esc", cx)))
-        );
+      return this.renderChoiceCard(t, { title: pendingQ.question, body: [], options: pendingQ.options, selected: 0 }, btn);
     }
+
+    // A selection menu on screen (folder trust, permission dialogs): offer its
+    // real options, since the highlighted default may be "No, exit".
+    if (screenChoice) return this.renderChoiceCard(t, screenChoice, btn);
 
     // Blocked at an idle composer: the agent asked a question in prose and
     // wants a typed reply, so approval keys would do nothing useful.
@@ -3351,6 +3389,8 @@ export default class AgentChat extends View {
           .child(
             this.terminal && this._readFor !== this.terminal
               ? "Loading conversation…"
+              : this.status === "blocked" || this.screenChoice()
+              ? "The agent is waiting on the prompt below."
               : "Send a message to start the conversation."
           )
       );

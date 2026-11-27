@@ -1,5 +1,5 @@
 import assert from "node:assert";
-import { parseConversation, stripAnsi, terminalQuotaFailure, screenAwaitsChoice } from "../mods/agent-chat/parser.js";
+import { parseConversation, stripAnsi, terminalQuotaFailure, screenAwaitsChoice, parseScreenChoice } from "../mods/agent-chat/parser.js";
 
 // Test 1: stripAnsi
 const ansiText = "\x1b[32mHello\x1b[0m \x1b[1mWorld\x1b[0m\r\n";
@@ -233,4 +233,85 @@ assert.strictEqual(
   assert.equal(screenAwaitsChoice(claudeDialog), true);
   assert.equal(screenAwaitsChoice("Overwrite file? (y/n)"), true);
   assert.equal(screenAwaitsChoice("› 1. Yes, proceed\n  2. No"), true);
+}
+
+// parseScreenChoice: Claude's folder-trust prompt has unnumbered options and
+// "No, exit" highlighted by default.
+{
+  const trust = [
+    "────────────────────────────────────────",
+    " Accessing workspace:",
+    "",
+    " /tmp/new-folder",
+    "",
+    " Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known",
+    " open source project, or work from your team).",
+    "",
+    " ❯ No, exit",
+    "   Yes, I trust this folder",
+    "",
+    " Enter to confirm · Esc to cancel",
+  ].join("\n");
+  const c = parseScreenChoice(trust);
+  assert.equal(c.title, "Accessing workspace:");
+  assert.deepEqual(c.options.map((o) => o.label), ["No, exit", "Yes, I trust this folder"]);
+  assert.equal(c.selected, 0);
+  assert.equal(c.body[1], "Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team).");
+
+  const numbered = parseScreenChoice("│ Do you want to proceed?\n│   1. Yes\n│ ❯ 2. No, and tell Claude\n");
+  assert.deepEqual(numbered.options.map((o) => o.label), ["Yes", "No, and tell Claude"]);
+  assert.equal(numbered.selected, 1);
+  assert.equal(numbered.title, "Do you want to proceed?");
+
+  // The composer's own "❯ typed text" prompt is not a menu.
+  assert.equal(parseScreenChoice("────\n❯ hello there\n────\n  ? for shortcuts"), null);
+}
+
+// parseScreenChoice: Antigravity (`>` highlight) and Codex (`›` numbered) trust prompts.
+{
+  const agy = [
+    "Accessing workspace:",
+    "",
+    "/tmp/new-folder",
+    "",
+    "Do you trust the contents of this project?",
+    "",
+    "> Yes, I trust this folder",
+    "  No, exit",
+    "",
+    "  ↑/↓ Navigate · enter Confirm",
+    "                                        auto · Claude Sonnet 5.5 · low",
+  ].join("\n");
+  const a = parseScreenChoice(agy);
+  assert.deepEqual(a.options.map((o) => o.label), ["Yes, I trust this folder", "No, exit"]);
+  assert.equal(a.body[1], "Do you trust the contents of this project?");
+
+  const codex = [
+    "  Folder access",
+    "  /tmp/new-folder",
+    "",
+    "  Trust this folder? Codex can read, edit, and run files here.",
+    "",
+    "› 1. Trust and continue",
+    "  2. Back to Agent Command Center",
+    "",
+    "  enter continue · esc back",
+  ].join("\n");
+  const c = parseScreenChoice(codex);
+  assert.equal(c.title, "Folder access");
+  assert.deepEqual(c.options.map((o) => o.label), ["Trust and continue", "Back to Agent Command Center"]);
+
+  // An earlier Antigravity user turn ("> ..." plus a wrapped line) is not a menu.
+  const oldTurn = [
+    "> what is the status?",
+    "  Can you check it?",
+    "",
+    "Everything is green.",
+    "",
+    "────────────",
+    ">",
+    "────────────",
+    "? for shortcuts",
+  ].join("\n");
+  assert.equal(parseScreenChoice(oldTurn), null);
 }

@@ -53,6 +53,65 @@ export function screenAwaitsChoice(text) {
   );
 }
 
+/**
+ * Reads the selection menu at the bottom of the screen: a highlighted option
+ * (`❯ No, exit`) with sibling options at the same indent, numbered or not.
+ * Claude's folder-trust prompt has unnumbered options whose default is
+ * "No, exit", so its choices must come from the screen, not guessed keys.
+ * Antigravity marks its highlight with `>`; to tell a menu from an old user
+ * turn (`> question` plus indented lines), at most a short footer may follow.
+ * The heading is the dialog text between the last rule line and the options.
+ * @param {string} text terminal screen text
+ * @returns {{ title: string, body: string[], options: { label: string }[], selected: number } | null}
+ */
+export function parseScreenChoice(text) {
+  const lines = stripAnsi(text)
+    .split("\n")
+    .map((line) => line.replace(/^\s*[│┃]\s?/, "").replace(/\s*[│┃]\s*$/, "").replace(/\s+$/, ""));
+  const indentOf = (line) => line.search(/\S/);
+  const isRule = (line) => /^\s*[─━╌┄\-╭╰╮╯]{8,}\s*$/.test(line);
+  const marker = /^(\s*)[❯›▶>]\s+(\S.*)$/;
+  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 40); i--) {
+    const m = marker.exec(lines[i]);
+    if (!m) continue;
+    const col = lines[i].indexOf(m[2]);
+    // Siblings sit at the label's column; deeper lines are descriptions.
+    const isOption = (line) => !marker.test(line) && indentOf(line) === col;
+    const belongs = (line) => line.trim() !== "" && !isRule(line) && indentOf(line) >= col && !marker.test(line);
+    let first = i;
+    while (first > 0 && belongs(lines[first - 1])) first--;
+    let last = i;
+    while (last < lines.length - 1 && belongs(lines[last + 1])) last++;
+    const options = [];
+    let selected = -1;
+    for (let k = first; k <= last; k++) {
+      if (k === i) selected = options.length;
+      else if (!isOption(lines[k])) continue;
+      const label = (k === i ? m[2] : lines[k].trim()).replace(/^\d+[.)]\s+/, "").trim();
+      if (label) options.push({ label });
+    }
+    if (options.length < 2) return null;
+    if (lines.slice(last + 1).filter((line) => line.trim()).length > 4) return null;
+    // A line that follows a long one is its soft wrap; others start a new row.
+    let top = first;
+    while (top > 0 && first - top < 14 && !isRule(lines[top - 1])) top--;
+    const head = [];
+    let prevLong = false;
+    for (let k = top; k < first; k++) {
+      const line = lines[k].trim();
+      if (!line) {
+        prevLong = false;
+        continue;
+      }
+      if (prevLong && head.length) head[head.length - 1] += ` ${line}`;
+      else head.push(line);
+      prevLong = line.length >= 70;
+    }
+    return { title: head[0] || "", body: head.slice(1, 5), options, selected };
+  }
+  return null;
+}
+
 export function terminalQuotaFailure(text) {
   const lines = stripAnsi(text).trimEnd().split("\n");
   return antigravityQuotaFailure(lines) || codexQuotaFailure(lines);
