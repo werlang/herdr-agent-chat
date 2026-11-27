@@ -34,7 +34,7 @@ const {
   parseScreenModel,
 } = await import("../mods/agent-chat/transcript-blocks.js");
 const { buildOpenCodePollQuery, buildOpenCodeEarlierQuery, messageItems } = await import("../mods/agent-chat/opencode-data.js");
-const { parseConversation } = await import("../mods/agent-chat/parser.js");
+const { parseConversation, screenAwaitsChoice } = await import("../mods/agent-chat/parser.js");
 const { claudeUserText, ClaudeTranscript } = await import("../mods/agent-chat/claude-transcript.js");
 const { ingestCodexEntry } = await import("../mods/agent-chat/codex-transcript.js");
 const { ingestAntigravityEntry } = await import("../mods/agent-chat/antigravity-transcript.js");
@@ -624,7 +624,7 @@ test("ingestCodexEntry emits notices only when thread settings change", async ()
 });
 
 test("screen parsers stay fast on a soft-wrapped single-line screen", async () => {
-  const { parseScreenChoice, screenAwaitsChoice } = await import("../mods/agent-chat/parser.js");
+  const { parseScreenChoice } = await import("../mods/agent-chat/parser.js");
   // A narrow full-screen TUI wraps every row, so the whole screen is one line.
   const line = `${" ".repeat(3800)}Build auto · GLM-5.3 OpenCode Go · max${" ".repeat(300)}⊙ 2 MCP`;
   const started = performance.now();
@@ -638,4 +638,8 @@ test("screen parsers stay fast on a soft-wrapped single-line screen", async () =
     parseScreenModel(" ┃  Build auto · GLM-5.3 OpenCode Go · high\n ╹▀▀▀▀", "opencode"),
     { model: "GLM-5.3 OpenCode Go", effort: "high" }
   );
+});
+
+test("screenAwaitsChoice ignores trailing blank screen rows", () => {
+  assert.equal(screenAwaitsChoice("Overwrite file? (y/n)" + "\n".repeat(120)), true);
 });

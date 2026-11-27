@@ -32,10 +32,17 @@ export function stripAnsi(str) {
  * the bottom of the screen, and a long scrollback must not cost every render.
  * @param {string} text
  * @param {number} count
+ * @param {boolean} [nonblank=false] Skip blank rows when collecting the tail.
  * @returns {string[]}
  */
-function tailLines(text, count) {
-  return stripAnsi(text).split("\n").slice(-count);
+function tailLines(text, count, nonblank = false) {
+  const lines = stripAnsi(text).split("\n");
+  if (!nonblank) return lines.slice(-count);
+  const tail = [];
+  for (let i = lines.length - 1; i >= 0 && tail.length < count; i--) {
+    if (lines[i].trim() !== "") tail.push(lines[i]);
+  }
+  return tail.reverse();
 }
 
 /**
@@ -64,7 +71,7 @@ function trimBorders(line, borders) {
  * @returns {boolean}
  */
 export function screenAwaitsChoice(text) {
-  const tail = tailLines(text, 120)
+  const tail = tailLines(text, 120, true)
     .map((line) => trimBorders(line, "│┃|"))
     .filter(Boolean)
     .slice(-25);
