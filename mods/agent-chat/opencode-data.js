@@ -218,8 +218,16 @@ export function noticeItem(seq, type, data) {
     return null;
   }
   if (type === "model-switched" && data?.model?.id) {
-    const variant = data.model.variant && data.model.variant !== "default" ? ` · ${data.model.variant}` : "";
-    return make("info", `Model switched to ${data.model.id}${variant}`);
+    // OpenCode's effort is the model's variant; a row that keeps the model and
+    // only changes the variant is an effort switch, worded like Claude's.
+    const variant = data.model.variant || "default";
+    const prev = data.previous;
+    if (prev?.id === data.model.id && prev.providerID === data.model.providerID) {
+      if ((prev.variant || "default") === variant) return null;
+      return make("info", `Effort set to ${variant}`);
+    }
+    const suffix = variant !== "default" ? ` · ${variant}` : "";
+    return make("info", `Model set to ${data.model.id}${suffix}`);
   }
   if (type === "compaction" && data?.status === "completed") {
     return make("info", "Earlier conversation compacted");

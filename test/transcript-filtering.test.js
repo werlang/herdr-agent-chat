@@ -590,3 +590,35 @@ test("parseScreenModel reads the OpenCode 2.4 footer without a Build/Plan prefix
   const emptyBox = " ┃\n ┃ Ask anything…\n ┃\n ╹▀▀▀▀▀▀▀▀▀▀\n";
   assert.equal(parseScreenModel(emptyBox, "opencode"), null);
 });
+
+test("ingestAntigravityEntry emits notices only for real model/effort switches", () => {
+  const state = { items: [], tools: new Map(), lastTool: null, model: null, effort: null };
+  const change = (from, to) => ingestAntigravityEntry(state, {
+    type: "USER_INPUT",
+    content: `<USER_SETTINGS_CHANGE>\nThe user changed setting \`Model Selection\` from ${from} to ${to}. No need to comment.</USER_SETTINGS_CHANGE>`,
+  });
+  change("None", "Gemini 3.8 Flash (Medium)");
+  assert.equal(state.model, "Gemini 3.8 Flash");
+  assert.deepEqual(state.items, []);
+  change("Gemini 3.8 Flash (Medium)", "Gemini 3.8 Flash (High)");
+  assert.equal(state.effort, "high");
+  change("Gemini 3.8 Flash (High)", "Orchestrator (Neon)");
+  assert.equal(state.model, "Orchestrator (Neon)");
+  assert.deepEqual(state.items.map((i) => i.text), ["Effort set to high", "Model set to Orchestrator (Neon)"]);
+});
+
+test("ingestCodexEntry emits notices only when thread settings change", async () => {
+  const { ingestCodexEntry } = await import("../mods/agent-chat/codex-transcript.js");
+  const state = { items: [], tools: new Map(), model: null, effort: null, sessionId: null };
+  const applied = (model, reasoning_effort) => ingestCodexEntry(state, {
+    type: "event_msg",
+    payload: { type: "thread_settings_applied", thread_settings: { model, reasoning_effort } },
+  });
+  applied("gpt-6.2-sol", "medium");
+  applied("gpt-6.2-sol", "medium");
+  assert.deepEqual(state.items, []);
+  applied("gpt-6.2-sol", "high");
+  applied("gpt-6.1-terra", "high");
+  assert.deepEqual(state.items.map((i) => i.text), ["Effort set to high", "Model set to gpt-6.1-terra"]);
+  assert.equal(state.model, "gpt-6.1-terra");
+});

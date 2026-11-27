@@ -56,15 +56,25 @@ export function ingestCodexEntry(state, entry) {
 
   if (entry.type !== "event_msg") return;
 
+  // Codex writes `thread_settings_applied` before every turn, with the values
+  // under `thread_settings`. Only a value that differs from the one already
+  // known is a switch; the first one seen (no prior value) is just the baseline.
   if (payload.type === "thread_settings_applied") {
-    if (payload.model) {
-      state.model = payload.model;
-      state.items.push({ type: "notice", tone: "info", text: `Model set to ${payload.model}` });
+    const settings = payload.thread_settings || payload;
+    const model = settings.model;
+    if (model) {
+      if (state.model && state.model !== model) {
+        state.items.push({ type: "notice", tone: "info", text: `Model set to ${model}` });
+      }
+      state.model = model;
     }
-    const eff = payload.effort || payload.reasoning_effort;
+    const eff = settings.reasoning_effort || settings.effort;
     if (eff) {
-      state.effort = String(eff).toLowerCase();
-      state.items.push({ type: "notice", tone: "info", text: `Effort set to ${state.effort}` });
+      const effort = String(eff).toLowerCase();
+      if (state.effort && state.effort !== effort) {
+        state.items.push({ type: "notice", tone: "info", text: `Effort set to ${effort}` });
+      }
+      state.effort = effort;
     }
     return;
   }
@@ -410,6 +420,9 @@ export class CodexTranscript {
     this.rawLines = [...older, ...this.rawLines];
     this.items = [];
     this.tools = new Map();
+    // Replayed from the start: switch notices compare against earlier values.
+    this.model = null;
+    this.effort = null;
     for (const line of this.rawLines) {
       if (!line) continue;
       try {

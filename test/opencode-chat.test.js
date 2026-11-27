@@ -237,7 +237,17 @@ test("noticeItem surfaces errors, interruptions, model switches and compactions"
   assert.equal(noticeItem(6, "idle", { outcome: "succeeded" }), null);
   assert.equal(
     noticeItem(7, "model-switched", { model: { id: "big-pickle", providerID: "opencode", variant: "max" } }).text,
-    "Model switched to big-pickle · max"
+    "Model set to big-pickle · max"
+  );
+  const prev = { id: "big-pickle", providerID: "opencode", variant: "low" };
+  assert.equal(
+    noticeItem(7, "model-switched", { model: { ...prev, variant: "max" }, previous: prev }).text,
+    "Effort set to max"
+  );
+  assert.equal(noticeItem(7, "model-switched", { model: prev, previous: prev }), null);
+  assert.equal(
+    noticeItem(7, "model-switched", { model: { id: "glm", providerID: "opencode", variant: "max" }, previous: prev }).text,
+    "Model set to glm · max"
   );
   assert.equal(noticeItem(8, "compaction", { status: "completed" }).text, "Earlier conversation compacted");
   assert.equal(noticeItem(8, "compaction", { status: "running" }), null);

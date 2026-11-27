@@ -44,6 +44,20 @@ function parseToolArgs(args) {
 }
 
 /**
+ * Splits an Antigravity "Model Selection" value such as "Gemini 4 Neon (Medium)"
+ * into its model and effort. A parenthesised suffix that is not an effort level
+ * (e.g. "Orchestrator (Neon)") stays part of the model name.
+ * @param {string} value
+ * @returns {{model: string, effort: string|null}}
+ */
+function splitSelection(value) {
+  const val = String(value || "").trim();
+  const eff = val.match(/\s*\((minimal|low|medium|high|xhigh|max|ultra)\)\s*$/i);
+  if (!eff) return { model: val, effort: null };
+  return { model: val.slice(0, -eff[0].length).trim(), effort: eff[1].toLowerCase() };
+}
+
+/**
  * Ingests a single parsed Antigravity transcript JSONL entry into `state`.
  * @param {{ items: Array<object>, tools: Map<string, object>, lastTool: object|null, model: string|null, effort: string|null }} state
  * @param {object} entry
@@ -62,15 +76,19 @@ export function ingestAntigravityEntry(state, entry) {
       if (m) {
         state.model = m[1].trim();
       } else {
-        const sel = settingsChange.match(/setting\s+`Model Selection`\s+from\s+.+?\s+to\s+([^.\n<]+)/i);
+        const sel = settingsChange.match(/setting\s+`Model Selection`\s+from\s+(.+?)\s+to\s+([^\n<]+?)\.(?:\s|$)/i);
         if (sel) {
-          const val = sel[1].trim();
-          const eff = val.match(/\s*\((minimal|low|medium|high|xhigh|max|ultra)\)\s*$/i);
-          if (eff) {
-            state.model = val.slice(0, -eff[0].length).trim();
-            state.effort = eff[1].toLowerCase();
-          } else {
-            state.model = val;
+          const from = splitSelection(sel[1]);
+          const to = splitSelection(sel[2]);
+          state.model = to.model;
+          if (to.effort) state.effort = to.effort;
+          // "from None" is the session's first pick, not a switch.
+          if (from.model && from.model.toLowerCase() !== "none") {
+            if (from.model !== to.model) {
+              state.items.push({ type: "notice", tone: "info", text: `Model set to ${to.model}` });
+            } else if (to.effort && from.effort !== to.effort) {
+              state.items.push({ type: "notice", tone: "info", text: `Effort set to ${to.effort}` });
+            }
           }
         }
       }
