@@ -4044,21 +4044,10 @@ export default class AgentChat extends View {
     const agyFamilies = isAntigravity
       ? groupAntigravityModels(this.agyModels)
       : [];
-    const currentAgyId =
-      this.agyPendingModel?.terminal === this.terminal
-        ? this.agyPendingModel.id
-        : this.transcript instanceof AntigravityTranscript && this.transcript.terminal === this.terminal
-        ? this.transcript.model
-        : null;
-    const currentAgyParsed = currentAgyId ? parseAntigravityModel(currentAgyId) : null;
-    const currentAgyFamily = isAntigravity
-      ? agyFamilies.find(
-          (f) =>
-            (currentAgyParsed && f.id === currentAgyParsed.familyId) ||
-            f.id === currentAgyId ||
-            (currentModelName && f.label === currentModelName)
-        ) || agyFamilies[0] || null
-      : null;
+    // Use the composer selection so a transcript worker cannot override the live preset.
+    const currentAgyFamily = currentModelName
+      ? agyFamilies.find((family) => family.label === currentModelName || family.id === currentModelName)
+      : agyFamilies[0];
 
     const currentClaudeRawId =
       (isClaude && this.activeClaudePending()?.model) ||
@@ -4189,7 +4178,7 @@ export default class AgentChat extends View {
       modelRows = agyFamilies
         .filter((fam) => matchesModelQuery(searchQuery, [fam.label, fam.id, ...Object.values(fam.variants)]))
         .map((fam) => {
-          const curEff = (currentEffort || currentAgyParsed?.effort || "medium").toLowerCase();
+          const curEff = (currentEffort || "medium").toLowerCase();
           const targetId = fam.variants[curEff] || fam.variants.medium || fam.variants.default || Object.values(fam.variants)[0] || fam.id;
           return row(
             `model-${fam.id}`,
