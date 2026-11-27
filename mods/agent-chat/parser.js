@@ -106,14 +106,19 @@ export function parseScreenChoice(text) {
   });
   const indentOf = (line) => line.search(/\S/);
   const isRule = (line) => /^\s*[─━╌┄\-╭╰╮╯]{8,}\s*$/.test(line);
+  const isIdleComposer = (line) =>
+    /^\s*[>❯›](?:\s+(?:Try\s+".*"|Ask Codex to do anything))?\s*$/.test(line);
+  const isConnector = (line) => /^\s*[└⎿├]/.test(line);
   const marker = /^(\s*)[❯›▶>]\s+(\S.*)$/;
   for (let i = lines.length - 1; i >= Math.max(0, lines.length - 40); i--) {
+    if (isIdleComposer(lines[i])) return null;
     const m = marker.exec(lines[i]);
     if (!m) continue;
     const col = lines[i].indexOf(m[2]);
     // Siblings sit at the label's column; deeper lines are descriptions.
-    const isOption = (line) => !marker.test(line) && indentOf(line) === col;
-    const belongs = (line) => line.trim() !== "" && !isRule(line) && indentOf(line) >= col && !marker.test(line);
+    const isOption = (line) => !marker.test(line) && !isConnector(line) && indentOf(line) === col;
+    const belongs = (line) =>
+      line.trim() !== "" && !isRule(line) && !isConnector(line) && indentOf(line) >= col && !marker.test(line);
     let first = i;
     while (first > 0 && belongs(lines[first - 1])) first--;
     let last = i;

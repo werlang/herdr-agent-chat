@@ -314,4 +314,39 @@ assert.strictEqual(
     "? for shortcuts",
   ].join("\n");
   assert.equal(parseScreenChoice(oldTurn), null);
+
+  // Antigravity startup banner + "> /model" + "└ Model already set..." above an idle composer is not a menu.
+  const agyModelSwitch = [
+    "  ▄▄▄  Antigravity CLI 1.5.18",
+    "  ▀▀▀  pswerlang@gmail.com (Google AI Pro)",
+    "       Orchestrator (Neon)",
+    "       ~/workspaces/node-aec",
+    "",
+    "> /model",
+    "  └ Model already set to Orchestrator (Neon)",
+    "",
+    "────────────",
+    ">",
+    "────────────",
+    "? for shortcuts",
+  ].join("\n");
+  assert.equal(parseScreenChoice(agyModelSwitch), null);
+
+  // Tree-connector output lines are not menu options even without an idle composer below.
+  assert.equal(
+    parseScreenChoice("> /model\n  └ Model already set to Orchestrator (Neon)"),
+    null
+  );
+
+  // A 2-line wrapped user prompt directly above an idle composer is not a menu.
+  const wrappedPrompt = [
+    "> first line",
+    "  second line",
+    "",
+    "────────────",
+    ">",
+    "────────────",
+    "? for shortcuts",
+  ].join("\n");
+  assert.equal(parseScreenChoice(wrappedPrompt), null);
 }
